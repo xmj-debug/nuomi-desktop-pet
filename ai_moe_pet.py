@@ -84,7 +84,7 @@ from PySide6.QtWidgets import (
 )
 
 BASE = Path(__file__).resolve().parent
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 DEFAULT_UPDATE_REPO = "xmj-debug/nuomi-desktop-pet"
 ASSET = BASE / "assets" / "codex-pet.png"
 DOG_FRAME_DIR = BASE / "assets" / "dog_frames"
@@ -1327,13 +1327,13 @@ def update_repo_name(config=None):
     return selected
 
 
-def update_public_files():
+def update_public_files(include_assets=False):
     paths = []
     for name in ("ai_moe_pet.py", "_kaoyan_data.py", "nuomi_watchdog.py", "README.md"):
         path = BASE / name
         if path.is_file():
             paths.append(path)
-    if (BASE / "assets").exists():
+    if include_assets and (BASE / "assets").exists():
         paths.extend(path for path in (BASE / "assets").rglob("*") if path.is_file())
     health_check = BASE / "tools" / "pet_health_check.py"
     if health_check.is_file():
@@ -1341,12 +1341,12 @@ def update_public_files():
     return sorted(set(paths), key=lambda item: item.relative_to(BASE).as_posix())
 
 
-def create_update_package(target_path, version=APP_VERSION):
+def create_update_package(target_path, version=APP_VERSION, include_assets=False):
     target = Path(target_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     entries = []
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in update_public_files():
+        for path in update_public_files(include_assets=include_assets):
             rel = path.relative_to(BASE).as_posix()
             raw = path.read_bytes()
             archive.writestr(rel, raw)
@@ -1361,6 +1361,7 @@ def create_update_package(target_path, version=APP_VERSION):
             "app": "NuomiDesktopPet",
             "package_type": "online_update",
             "version": str(version),
+            "include_assets": bool(include_assets),
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "files": entries,
         }
@@ -1370,18 +1371,31 @@ def create_update_package(target_path, version=APP_VERSION):
 
 def latest_github_release(repo=None):
     repo = repo or DEFAULT_UPDATE_REPO
-    response = httpx.get(
-        f"https://api.github.com/repos/{repo}/releases/latest",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": f"NuomiDesktopPet/{APP_VERSION}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-        follow_redirects=True,
-        timeout=25,
-    )
-    response.raise_for_status()
-    release = response.json()
+    url = f"https://api.github.com/repos/{repo}/releases/latest"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": f"NuomiDesktopPet/{APP_VERSION}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    release = None
+    errors = []
+    for attempt in range(3):
+        try:
+            response = httpx.get(
+                url,
+                headers=headers,
+                follow_redirects=True,
+                timeout=httpx.Timeout(connect=15, read=30, write=15, pool=15),
+            )
+            response.raise_for_status()
+            release = response.json()
+            break
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+            if attempt < 2:
+                time.sleep(1.5 * (attempt + 1))
+    if release is None:
+        raise RuntimeError("GitHub 最新版本查询失败；" + "；".join(errors))
     assets = release.get("assets", []) or []
     update_assets = [
         item
@@ -1400,7 +1414,9 @@ def latest_github_release(repo=None):
         "url": str(release.get("html_url", "")),
         "asset_name": str(asset.get("name", "")),
         "asset_url": str(asset.get("browser_download_url", "")),
+        "asset_api_url": str(asset.get("url", "")),
         "asset_size": int(asset.get("size", 0) or 0),
+        "asset_digest": str(asset.get("digest", "") or ""),
     }
 
 
@@ -1466,20 +1482,100 @@ def download_latest_update(config=None):
     UPDATE_DIR.mkdir(exist_ok=True)
     download = UPDATE_DIR / release["asset_name"]
     temp_download = download.with_suffix(download.suffix + ".part")
-    with httpx.stream(
-        "GET",
-        release["asset_url"],
-        headers={"User-Agent": f"NuomiDesktopPet/{APP_VERSION}"},
-        follow_redirects=True,
-        timeout=60,
-    ) as response:
-        response.raise_for_status()
-        with temp_download.open("wb") as handle:
-            for chunk in response.iter_bytes(1024 * 1024):
-                handle.write(chunk)
+    errors = []
+    downloaded = False
+    timeout = httpx.Timeout(connect=20, read=120, write=30, pool=20)
+    asset_api_url = release.get("asset_api_url", "")
+    asset_size = int(release.get("asset_size", 0) or 0)
+    if asset_api_url and asset_size > 0:
+        try:
+            chunk_size = 4 * 1024 * 1024
+            temp_download.unlink(missing_ok=True)
+            with temp_download.open("wb") as handle:
+                for start in range(0, asset_size, chunk_size):
+                    end = min(asset_size - 1, start + chunk_size - 1)
+                    chunk = None
+                    chunk_errors = []
+                    for attempt in range(3):
+                        try:
+                            response = httpx.get(
+                                asset_api_url,
+                                headers={
+                                    "Accept": "application/octet-stream",
+                                    "User-Agent": f"NuomiDesktopPet/{APP_VERSION}",
+                                    "X-GitHub-Api-Version": "2022-11-28",
+                                    "Range": f"bytes={start}-{end}",
+                                },
+                                follow_redirects=True,
+                                timeout=timeout,
+                            )
+                            response.raise_for_status()
+                            content_type = response.headers.get("content-type", "").lower()
+                            if "application/json" in content_type:
+                                raise RuntimeError("GitHub 返回了资源元数据而不是更新文件")
+                            chunk = response.content
+                            expected = end - start + 1
+                            if response.status_code == 206 and len(chunk) != expected:
+                                raise RuntimeError(f"分块大小不完整：{len(chunk)}/{expected}")
+                            if response.status_code == 200 and len(chunk) == asset_size and start == 0:
+                                handle.write(chunk)
+                                start = asset_size
+                                break
+                            if response.status_code != 206:
+                                raise RuntimeError(f"GitHub 不支持分块下载：HTTP {response.status_code}")
+                            break
+                        except Exception as exc:
+                            chunk = None
+                            chunk_errors.append(f"{type(exc).__name__}: {exc}")
+                            if attempt < 2:
+                                time.sleep(1.5 * (attempt + 1))
+                    if chunk is None:
+                        raise RuntimeError(
+                            f"分块 {start}-{end} 下载失败；" + "；".join(chunk_errors)
+                        )
+                    if response.status_code == 200 and len(chunk) == asset_size and start == 0:
+                        break
+                    handle.write(chunk)
+            downloaded = True
+        except Exception as exc:
+            errors.append(f"{asset_api_url}: {type(exc).__name__}: {exc}")
+    if not downloaded:
+        source_url = release["asset_url"]
+        temp_download.unlink(missing_ok=True)
+        try:
+            with httpx.stream(
+                "GET",
+                source_url,
+                headers={
+                    "Accept": "application/octet-stream",
+                    "User-Agent": f"NuomiDesktopPet/{APP_VERSION}",
+                },
+                follow_redirects=True,
+                timeout=timeout,
+            ) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "").lower()
+                if "application/json" in content_type:
+                    raise RuntimeError("GitHub 返回了资源元数据而不是更新文件")
+                with temp_download.open("wb") as handle:
+                    for chunk in response.iter_bytes(1024 * 1024):
+                        handle.write(chunk)
+            downloaded = temp_download.stat().st_size > 0
+        except Exception as exc:
+            errors.append(f"{source_url}: {type(exc).__name__}: {exc}")
+    if not downloaded:
+        temp_download.unlink(missing_ok=True)
+        raise RuntimeError("GitHub 更新包下载失败；" + "；".join(errors))
     if release["asset_size"] and temp_download.stat().st_size != release["asset_size"]:
         temp_download.unlink(missing_ok=True)
         raise RuntimeError("更新包下载大小不完整")
+    digest = release.get("asset_digest", "")
+    if digest.lower().startswith("sha256:"):
+        expected_digest = digest.split(":", 1)[1].strip().lower()
+        actual_digest = hashlib.sha256(temp_download.read_bytes()).hexdigest().lower()
+        if actual_digest != expected_digest:
+            temp_download.unlink(missing_ok=True)
+            raise RuntimeError("更新包与 GitHub SHA-256 摘要不一致")
     temp_download.replace(download)
     stage = UPDATE_DIR / f"staged-{release['version']}"
     if stage.exists():
