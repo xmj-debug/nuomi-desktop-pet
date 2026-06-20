@@ -1,0 +1,32 @@
+# Personal data and credentials
+pet-config.json
+pet-chat-history.json
+pet-clipboard-history.json
+pet-mail-state.json
+pet-memory.json
+pet-study.json
+pet-todos.json
+pet-calendar.json
+pet-wordbook.json
+pet-notes.txt
+
+# Runtime state and generated packages
+backups/
+updates/
+dist/
+migration-test/
+screenshots/
+*.log
+pet-shutdown.flag
+pet-update.lock
+__pycache__/
+*.py[cod]
+
+# Local tooling and private settings
+.claude/
+.agents/
+.codex/
+python-*-amd64.exe
+tools/*.exe
+ui_audit_*.png
+toolbox-server.*.log
