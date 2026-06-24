@@ -84,7 +84,7 @@ from PySide6.QtWidgets import (
 )
 
 BASE = Path(__file__).resolve().parent
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.1.0"
 DEFAULT_UPDATE_REPO = "xmj-debug/nuomi-desktop-pet"
 ASSET = BASE / "assets" / "codex-pet.png"
 DOG_FRAME_DIR = BASE / "assets" / "dog_frames"
@@ -341,6 +341,9 @@ DEFAULT_CONFIG = {
     "CpuAlertPercent": 90,
     "MemoryAlertPercent": 90,
     "DiskAlertPercent": 90,
+    "BatteryAlertsEnabled": True,
+    "BatteryLowPercent": 20,
+    "BatteryFullPercent": 95,
     "HealthAlertCooldownMinutes": 15,
     "ClaudeLastProject": str(BASE),
     "ClaudeRecentProjects": [],
@@ -3016,10 +3019,11 @@ def compact_health_lines(config):
         f"CPU {snapshot['cpu']:.0f}% / 内存 {snapshot['memory_percent']:.0f}% / 磁盘 {snapshot['disk_percent']:.0f}%",
         f"VPN：{snapshot['vpn']}，Codex：{snapshot['codex']}",
     ]
+    lines.extend(battery_status_lines(config, snapshot.get("battery"))[:2])
     if snapshot["issues"]:
-        lines.append("异常：" + "；".join(text for _key, text in snapshot["issues"]))
+        lines.append("需要注意：" + "；".join(text for _key, text in snapshot["issues"]))
     else:
-        lines.append("异常：暂无")
+        lines.append("需要注意：暂无")
     return lines
 
 
@@ -4244,6 +4248,96 @@ def human_bytes(value):
         size /= 1024
 
 
+def battery_snapshot(provider=None):
+    source = provider or getattr(psutil, "sensors_battery", None)
+    if source is None:
+        return {"available": False, "percent": None, "plugged": None, "seconds_left": None}
+    try:
+        battery = source()
+    except Exception:
+        battery = None
+    if battery is None:
+        return {"available": False, "percent": None, "plugged": None, "seconds_left": None}
+    try:
+        percent = max(0.0, min(100.0, float(battery.percent)))
+    except Exception:
+        percent = 0.0
+    plugged = bool(getattr(battery, "power_plugged", False))
+    seconds_left = getattr(battery, "secsleft", None)
+    unknown_values = {
+        getattr(psutil, "POWER_TIME_UNKNOWN", -1),
+        getattr(psutil, "POWER_TIME_UNLIMITED", -2),
+    }
+    if plugged or seconds_left in unknown_values:
+        seconds_left = None
+    else:
+        try:
+            seconds_left = max(0, int(seconds_left))
+        except Exception:
+            seconds_left = None
+    return {
+        "available": True,
+        "percent": percent,
+        "plugged": plugged,
+        "seconds_left": seconds_left,
+    }
+
+
+def battery_time_text(seconds):
+    if seconds is None:
+        return ""
+    minutes = max(0, int(seconds) // 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"约 {hours} 小时 {minutes} 分钟"
+    return f"约 {minutes} 分钟"
+
+
+def battery_status_lines(config=None, snapshot=None):
+    config = config or {}
+    snapshot = snapshot or battery_snapshot()
+    if not snapshot.get("available"):
+        return ["当前设备未检测到电池。", "仍可打开 Windows 电源设置调整睡眠和屏幕策略。"]
+    percent = float(snapshot.get("percent", 0))
+    plugged = bool(snapshot.get("plugged"))
+    if plugged and percent >= 99.5:
+        state = "已充满"
+    elif plugged:
+        state = "正在充电"
+    else:
+        state = "正在使用电池"
+    lines = [f"电量 {percent:.0f}% · {state}"]
+    remaining = battery_time_text(snapshot.get("seconds_left"))
+    if remaining:
+        lines.append(f"预计剩余 {remaining}")
+    if config.get("BatteryAlertsEnabled", True):
+        lines.append(
+            f"低电量 {int(config.get('BatteryLowPercent', 20))}% 提醒 · "
+            f"充至 {int(config.get('BatteryFullPercent', 95))}% 提示拔电"
+        )
+    else:
+        lines.append("电池提醒已关闭")
+    return lines
+
+
+def battery_alert_issues(config=None, snapshot=None):
+    config = config or {}
+    snapshot = snapshot or battery_snapshot()
+    if not config.get("BatteryAlertsEnabled", True) or not snapshot.get("available"):
+        return []
+    percent = float(snapshot.get("percent", 0))
+    plugged = bool(snapshot.get("plugged"))
+    low = max(5, min(40, int(config.get("BatteryLowPercent", 20))))
+    full = max(80, min(100, int(config.get("BatteryFullPercent", 95))))
+    if not plugged and percent <= low:
+        remaining = battery_time_text(snapshot.get("seconds_left"))
+        suffix = f"，预计还能使用 {remaining}" if remaining else ""
+        return [("battery_low", f"电池仅剩 {percent:.0f}%{suffix}，请及时接通电源")]
+    if plugged and percent >= full:
+        return [("battery_full", f"电池已充至 {percent:.0f}%，可以拔掉电源减少长期满电停留")]
+    return []
+
+
 def disk_usage_summary():
     parts = []
     for drive in ("C:\\", "D:\\"):
@@ -4368,6 +4462,7 @@ def hardware_info_lines():
         lines.append(f"启动时间：{boot_time}")
     except Exception:
         pass
+    lines.extend(["", "电池 / 电源", *battery_status_lines(DEFAULT_CONFIG)])
     return lines
 
 
@@ -4390,6 +4485,7 @@ def system_health_snapshot(config=None):
     cpu_limit = int(config.get("CpuAlertPercent", 90))
     mem_limit = int(config.get("MemoryAlertPercent", 90))
     disk_limit = int(config.get("DiskAlertPercent", 90))
+    battery = battery_snapshot()
     issues = []
     if cpu >= cpu_limit:
         issues.append(("cpu", f"CPU 占用 {cpu:.0f}%（阈值 {cpu_limit}%）"))
@@ -4398,6 +4494,7 @@ def system_health_snapshot(config=None):
     if disk_percent >= disk_limit:
         free_text = human_bytes(disk.free) if disk else "未知"
         issues.append(("disk", f"{disk_path} 磁盘占用 {disk_percent:.0f}%（剩余 {free_text}）"))
+    issues.extend(battery_alert_issues(config, battery))
     return {
         "cpu": cpu,
         "memory_percent": mem.percent,
@@ -4407,6 +4504,7 @@ def system_health_snapshot(config=None):
         "disk_free": disk.free if disk else 0,
         "vpn": vpn,
         "codex": codex,
+        "battery": battery,
         "issues": issues,
     }
 
@@ -4422,10 +4520,11 @@ def system_health_lines(config=None):
         f"{snapshot['disk_path']} 磁盘 {snapshot['disk_percent']:.0f}%"
     )
     lines.append(f"VPN：{snapshot['vpn']}，Codex：{snapshot['codex']}")
+    lines.extend(battery_status_lines(config, snapshot.get("battery")))
     if snapshot["issues"]:
-        lines.append("发现异常：" + "；".join(text for _key, text in snapshot["issues"]))
+        lines.append("需要注意：" + "；".join(text for _key, text in snapshot["issues"]))
     else:
-        lines.append("发现异常：暂无")
+        lines.append("需要注意：暂无")
     return lines
 
 
@@ -7569,6 +7668,7 @@ class TodayBoardDialog(QDialog):
             ("待办 / 日程", upcoming_todo_lines(4) + [""] + upcoming_event_lines(4)),
             ("天气 / 邮件", [getattr(pet, "weather_text", f"{pet.config.get('WeatherCity', '上海')} 天气读取中"), mail_dashboard_text()]),
             ("电脑状态", compact_health_lines(pet.config)),
+            ("电池 / 电源", battery_status_lines(pet.config)),
             ("考研 / 学习", today_study_lines(pet.config)),
         ]
         for index, (name, lines) in enumerate(section_items):
@@ -8189,6 +8289,99 @@ class DiagnosticsDialog(QDialog):
             QMessageBox.information(self, "运行日志", f"{RUNTIME_LOG}\n{exc}")
 
 
+class BatteryDialog(QDialog):
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self.config = dict(config or {})
+        self.status_text = ""
+        self.setWindowTitle("电池 / 电源")
+        self.resize(580, 390)
+        self.setMinimumSize(500, 340)
+        self.setSizeGripEnabled(True)
+        self.setStyleSheet(APP_DIALOG_STYLE)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+        title = QLabel("电池 / 电源")
+        title.setObjectName("title")
+        layout.addWidget(title)
+
+        self.status = QLabel()
+        self.status.setObjectName("panel")
+        self.status.setWordWrap(True)
+        self.status.setMinimumHeight(125)
+        layout.addWidget(self.status)
+
+        self.updated = QLabel()
+        self.updated.setObjectName("hint")
+        layout.addWidget(self.updated)
+        layout.addStretch(1)
+
+        actions = QHBoxLayout()
+        refresh = QPushButton("刷新")
+        refresh.setObjectName("sendButton")
+        report = QPushButton("生成电池报告")
+        settings = QPushButton("电源设置")
+        copy = QPushButton("复制状态")
+        close = QPushButton("关闭")
+        for button in (report, settings, copy, close):
+            button.setObjectName("ghostButton")
+        refresh.clicked.connect(self.refresh)
+        report.clicked.connect(self.generate_report)
+        settings.clicked.connect(self.open_power_settings)
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(self.status_text))
+        close.clicked.connect(self.close)
+        for button in (refresh, report, settings, copy):
+            actions.addWidget(button)
+        actions.addStretch(1)
+        actions.addWidget(close)
+        layout.addLayout(actions)
+
+        self.timer = QTimer(self)
+        self.timer.setInterval(15_000)
+        self.timer.timeout.connect(self.refresh)
+        self.timer.start()
+        self.refresh()
+
+    def refresh(self):
+        snapshot = battery_snapshot()
+        lines = battery_status_lines(self.config, snapshot)
+        self.status_text = "\n".join(lines)
+        self.status.setText(self.status_text)
+        self.updated.setText(f"更新时间：{datetime.now():%H:%M:%S}")
+
+    def open_power_settings(self):
+        try:
+            os.startfile("ms-settings:powersleep")
+        except Exception as exc:
+            QMessageBox.information(self, "电源设置", f"无法打开 Windows 电源设置：{exc}")
+
+    def generate_report(self):
+        BACKUP_DIR.mkdir(exist_ok=True)
+        target = BACKUP_DIR / f"battery-report-{datetime.now():%Y%m%d-%H%M%S}.html"
+        try:
+            completed = subprocess.run(
+                ["powercfg", "/batteryreport", "/output", str(target)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=25,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "电池报告", f"生成失败：{exc}")
+            return
+        if completed.returncode != 0 or not target.exists():
+            QMessageBox.information(self, "电池报告", "Windows 没有生成电池报告；台式机或无电池设备可能不支持。")
+            return
+        try:
+            os.startfile(str(target))
+        except Exception:
+            pass
+        QMessageBox.information(self, "电池报告", f"报告已保存：\n{target}")
+
+
 class PerformanceDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -8709,6 +8902,7 @@ class PetSmartMenu(QDialog):
             ("动作", pet.open_action_lab),
             ("诊断", pet.open_diagnostics),
             ("词库", pet.open_notebook),
+            ("电池", pet.open_battery),
             ("关气泡", pet.close_current_bubble),
             ("单词开关", pet.toggle_word_popup),
         ]
@@ -8887,6 +9081,10 @@ class HelpDialog(QDialog):
             "- 右键菜单“清理”可以扫描临时文件、浏览器缓存、pip 缓存和糯米 Python 缓存\n"
             "- 清理前必须勾选并确认；大文件和资源占用只展示，不自动删除或结束进程\n"
             "- 可以快速打开 Windows 存储设置、启动项设置、系统磁盘清理和任务管理器\n\n"
+            "电池 / 电源\n"
+            "- 右键菜单“电池”显示电量、充电状态和预计剩余时间\n"
+            "- 低电量会作为必要提醒；充到设定阈值后提示拔电，阈值可在设置 > 高级调整\n"
+            "- 可生成 Windows 电池报告，报告只保存在本机 backups 文件夹\n\n"
             "桌面整理\n"
             "- 右键菜单“整理”会先扫描桌面文件并生成归类预览\n"
             "- 勾选后确认才会移动文件；只移动文件，不移动文件夹\n"
@@ -9417,6 +9615,16 @@ class SettingsDialog(QDialog):
         self.disk_alert.setRange(70, 100)
         self.disk_alert.setSuffix("%")
         self.disk_alert.setValue(int(config.get("DiskAlertPercent", 90)))
+        self.battery_alerts_enabled = QCheckBox("启用笔记本低电量和充满提示")
+        self.battery_alerts_enabled.setChecked(bool(config.get("BatteryAlertsEnabled", True)))
+        self.battery_low = QSpinBox()
+        self.battery_low.setRange(5, 40)
+        self.battery_low.setSuffix("%")
+        self.battery_low.setValue(int(config.get("BatteryLowPercent", 20)))
+        self.battery_full = QSpinBox()
+        self.battery_full.setRange(80, 100)
+        self.battery_full.setSuffix("%")
+        self.battery_full.setValue(int(config.get("BatteryFullPercent", 95)))
         self.health_cooldown = QSpinBox()
         self.health_cooldown.setRange(3, 120)
         self.health_cooldown.setSuffix(" 分钟")
@@ -9545,6 +9753,9 @@ class SettingsDialog(QDialog):
         advanced_form.addRow("CPU 提醒阈值", self.cpu_alert)
         advanced_form.addRow("内存提醒阈值", self.memory_alert)
         advanced_form.addRow("磁盘提醒阈值", self.disk_alert)
+        advanced_form.addRow(self.battery_alerts_enabled)
+        advanced_form.addRow("低电量提醒阈值", self.battery_low)
+        advanced_form.addRow("充满提示阈值", self.battery_full)
         advanced_form.addRow("同类提醒冷却", self.health_cooldown)
         advanced_form.addRow(diagnostics_btn)
         advanced_form.addRow(backup_btn)
@@ -9910,6 +10121,9 @@ class SettingsDialog(QDialog):
                 "CpuAlertPercent": self.cpu_alert.value(),
                 "MemoryAlertPercent": self.memory_alert.value(),
                 "DiskAlertPercent": self.disk_alert.value(),
+                "BatteryAlertsEnabled": self.battery_alerts_enabled.isChecked(),
+                "BatteryLowPercent": self.battery_low.value(),
+                "BatteryFullPercent": self.battery_full.value(),
                 "HealthAlertCooldownMinutes": self.health_cooldown.value(),
                 "WeatherCity": self.weather_city.text().strip() or "上海",
             }
@@ -9996,7 +10210,7 @@ class PetWindow(QWidget):
         self.tick.start(1000)
         self.monitor = QTimer(self)
         self.monitor.timeout.connect(self.update_status)
-        self.monitor.start(3000)
+        self.monitor.start(15_000)
         self.weather_timer = QTimer(self)
         self.weather_timer.timeout.connect(self.refresh_weather)
         self.weather_timer.start(30 * 60 * 1000)
@@ -10004,7 +10218,12 @@ class PetWindow(QWidget):
         self.mail_timer.timeout.connect(self.check_mail)
         self.mail_timer.start(5 * 60 * 1000)
         self.health_bad_counts = {}
-        self.health_last_alert = {}
+        saved_health_alerts = load_pet_memory().get("health_last_alert", {})
+        self.health_last_alert = (
+            {str(key): float(value) for key, value in saved_health_alerts.items() if isinstance(value, (int, float))}
+            if isinstance(saved_health_alerts, dict)
+            else {}
+        )
         self.health_timer = QTimer(self)
         self.health_timer.setInterval(60 * 1000)
         self.health_timer.timeout.connect(self.check_system_health)
@@ -11383,6 +11602,9 @@ class PetWindow(QWidget):
     def open_performance(self):
         PerformanceDialog(self).exec()
 
+    def open_battery(self):
+        BatteryDialog(self.config, self).exec()
+
     def open_desktop_organizer(self):
         dlg = PerformanceDialog(self)
         dlg.scan_desktop_organize()
@@ -11710,14 +11932,23 @@ class PetWindow(QWidget):
             required_hits = 2 if key == "cpu" else 1
             if self.health_bad_counts[key] < required_hits:
                 continue
-            if now - self.health_last_alert.get(key, 0) < cooldown:
+            key_cooldown = max(cooldown, 60 * 60) if key == "battery_full" else cooldown
+            if now - self.health_last_alert.get(key, 0) < key_cooldown:
                 continue
             self.health_last_alert[key] = now
-            alerts.append(text)
+            alerts.append((key, text))
+
+        if alerts:
+            memory = load_pet_memory()
+            memory["health_last_alert"] = self.health_last_alert
+            save_pet_memory(memory)
 
         if not alerts:
             return
-        message = "电脑状态提醒\n" + "\n".join(f"- {text}" for text in alerts)
+        message = "电脑状态提醒\n" + "\n".join(f"- {text}" for _key, text in alerts)
+        if any(key == "battery_low" for key, _text in alerts):
+            self.notify_due_reminder("低电量提醒", message, QSystemTrayIcon.Warning, 12000)
+            return
         append_runtime_log(message.replace("\n", "；"))
         if self.tray and not self.isVisible():
             self.tray.showMessage(
@@ -11745,24 +11976,6 @@ class PetWindow(QWidget):
         self.react("提醒", text, voice_kind="reminder")
 
     def update_status(self):
-        cpu = psutil.cpu_percent(interval=None)
-        mem = psutil.virtual_memory()
-        net = psutil.net_io_counters()
-        if not hasattr(self, "last_net"):
-            self.last_net = (time.time(), net.bytes_sent, net.bytes_recv)
-            up = down = 0
-        else:
-            now = time.time()
-            last_t, last_up, last_down = self.last_net
-            dt = max(1, now - last_t)
-            up = (net.bytes_sent - last_up) / dt
-            down = (net.bytes_recv - last_down) / dt
-            self.last_net = (now, net.bytes_sent, net.bytes_recv)
-        vpn = detect_vpn_status_cached()
-        codex = detect_codex_process_cached()
-        holiday = next_holiday_text()
-        todo_text = next_todo_preview()
-        _detail = f"{holiday} {todo_text} CPU {cpu:.0f}% RAM {mem.percent:.0f}% ↑{up/1024:.0f}KB/s ↓{down/1024:.0f}KB/s VPN {vpn} Codex {codex}"
         icon = {
             "待机": "😺",
             "开心": "😺",

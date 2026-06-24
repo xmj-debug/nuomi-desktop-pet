@@ -130,6 +130,18 @@ def main():
         except Exception as exc:
             success = fail(f"dependency {module}", str(exc)) and success
 
+    try:
+        import psutil
+
+        battery = psutil.sensors_battery()
+        if battery is None:
+            ok("battery", "not detected (desktop/no battery)")
+        else:
+            state = "plugged" if battery.power_plugged else "on battery"
+            ok("battery", f"{battery.percent:.0f}% {state}")
+    except Exception as exc:
+        success = fail("battery API", str(exc)) and success
+
     pythonw = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Python312" / "pythonw.exe"
     if path_exists(pythonw):
         ok("pythonw", str(pythonw))
