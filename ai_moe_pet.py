@@ -46,8 +46,8 @@ from xml.sax.saxutils import escape as xml_escape
 import httpx
 import psutil
 from PIL import Image
-from PySide6.QtCore import QAbstractNativeEventFilter, QEasingCurve, QPoint, QPropertyAnimation, QRect, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QColor, QCursor, QFont, QIcon, QKeyEvent, QPainter, QPen, QPixmap, QPolygon, QShortcut, QTextCursor, QTransform
+from PySide6.QtCore import QAbstractNativeEventFilter, QEasingCurve, QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QAction, QColor, QCursor, QFont, QIcon, QKeyEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTransform
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -84,7 +84,7 @@ from PySide6.QtWidgets import (
 )
 
 BASE = Path(__file__).resolve().parent
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 DEFAULT_UPDATE_REPO = "xmj-debug/nuomi-desktop-pet"
 ASSET = BASE / "assets" / "codex-pet.png"
 DOG_FRAME_DIR = BASE / "assets" / "dog_frames"
@@ -270,6 +270,57 @@ def foreground_window_fullscreen(exclude_hwnds=None, exclude_pids=None):
     width = rect.right - rect.left
     height = rect.bottom - rect.top
     return width >= geo.width() - 8 and height >= geo.height() - 8 and rect.left <= geo.left() + 8 and rect.top <= geo.top() + 8
+
+
+def rect_intersection_area(a, b):
+    inter = a.intersected(b)
+    if inter.isNull():
+        return 0
+    return max(0, inter.width()) * max(0, inter.height())
+
+
+def screen_available_geometry_for_rect(rect):
+    app = QApplication.instance()
+    fallback = QRect(0, 0, 1280, 720)
+    if not app:
+        return fallback
+    points = [rect.center(), rect.topLeft(), rect.topRight(), rect.bottomLeft(), rect.bottomRight(), QCursor.pos()]
+    for point in points:
+        screen = app.screenAt(point)
+        if screen:
+            return screen.availableGeometry()
+    screens = app.screens()
+    if not screens:
+        screen = app.primaryScreen()
+        return screen.availableGeometry() if screen else fallback
+    best = max(screens, key=lambda item: rect_intersection_area(rect, item.availableGeometry()))
+    if rect_intersection_area(rect, best.availableGeometry()) <= 0:
+        best = app.primaryScreen() or best
+    return best.availableGeometry()
+
+
+def clamp_window_position(pos, size):
+    width = max(1, int(size.width()))
+    height = max(1, int(size.height()))
+    bounds = screen_available_geometry_for_rect(QRect(pos, QSize(width, height)))
+    max_x = max(bounds.left(), bounds.right() - width + 1)
+    max_y = max(bounds.top(), bounds.bottom() - height + 1)
+    return QPoint(
+        min(max(int(pos.x()), bounds.left()), max_x),
+        min(max(int(pos.y()), bounds.top()), max_y),
+    )
+
+
+def default_window_position(size):
+    app = QApplication.instance()
+    screen = (app.screenAt(QCursor.pos()) or app.primaryScreen()) if app else None
+    bounds = screen.availableGeometry() if screen else QRect(0, 0, 1280, 720)
+    width = max(1, int(size.width()))
+    height = max(1, int(size.height()))
+    return clamp_window_position(
+        QPoint(bounds.right() - width - 72, bounds.bottom() - height - 72),
+        QSize(width, height),
+    )
 
 
 DEFAULT_CONFIG = {
@@ -5184,10 +5235,6 @@ class Bubble(QLabel):
         rect = self.rect().adjusted(int(inset), int(inset), -int(inset), -int(inset + tail_height))
         brush = color_with_alpha(colors["background"], 232, DEFAULT_CONFIG["BubbleBackgroundColor"])
         pen = QPen(color_with_alpha(colors["border"], 210, DEFAULT_CONFIG["BubbleBorderColor"]), pen_width)
-        painter.setBrush(brush)
-        painter.setPen(pen)
-        painter.drawRoundedRect(rect, frame["radius"], frame["radius"])
-        bottom = rect.bottom()
         tip_x = bubble_tail_tip_x(
             self.width(),
             self.config,
@@ -5195,12 +5242,17 @@ class Bubble(QLabel):
             self.tail_tip_x if self.tail_tip_x > 0 else None,
         )
         half = max(8, tail_width // 2)
-        points = [
-            QPoint(tip_x - half, bottom - 1),
-            QPoint(tip_x + half, bottom - 1),
-            QPoint(tip_x, bottom + tail_height),
-        ]
-        painter.drawPolygon(QPolygon(points))
+        body_path = QPainterPath()
+        body_path.addRoundedRect(QRectF(rect), frame["radius"], frame["radius"])
+        bottom = rect.bottom()
+        tail_path = QPainterPath()
+        tail_path.moveTo(tip_x - half, bottom - 1)
+        tail_path.quadTo(tip_x - max(2, half // 3), bottom + max(3, tail_height // 4), tip_x, bottom + tail_height)
+        tail_path.quadTo(tip_x + max(2, half // 3), bottom + max(3, tail_height // 4), tip_x + half, bottom - 1)
+        tail_path.closeSubpath()
+        painter.setBrush(brush)
+        painter.setPen(pen)
+        painter.drawPath(body_path.united(tail_path).simplified())
         painter.end()
         super().paintEvent(event)
 
@@ -5273,7 +5325,10 @@ class Bubble(QLabel):
             if self._dragging_bubble or delta.manhattanLength() >= QApplication.startDragDistance():
                 self._dragging_bubble = True
                 if self.owner is not None and hasattr(self.owner, "move"):
-                    self.owner.move(self._owner_start_pos + delta)
+                    target = self._owner_start_pos + delta
+                    if hasattr(self.owner, "clamped_pos"):
+                        target = self.owner.clamped_pos(target)
+                    self.owner.move(target)
                     if hasattr(self.owner, "position_bubble"):
                         self.owner.position_bubble()
                 else:
@@ -10191,9 +10246,8 @@ class PetWindow(QWidget):
         self.sprite.drag_started.connect(self.begin_sprite_drag)
         self.sprite.drag_moved.connect(self.move_sprite_drag)
         self.sprite.drag_finished.connect(self.end_sprite_drag)
-        left = int(self.config.get("WindowLeft", -1))
-        top = int(self.config.get("WindowTop", -1))
-        self.move(left if left >= 0 else 1200, top if top >= 0 else 520)
+        self.adjustSize()
+        self.restore_window_position_from_config()
         self.anim = QPropertyAnimation(self, b"pos", self)
         self.anim.setDuration(1800)
         self.anim.setEasingCurve(QEasingCurve.InOutSine)
@@ -10336,9 +10390,7 @@ class PetWindow(QWidget):
         reason = self.auto_hide_context_reason()
         if reason:
             if self.isVisible() and not self.dragging:
-                self.config["WindowLeft"] = self.x()
-                self.config["WindowTop"] = self.y()
-                save_json(CONFIG, self.config)
+                self.save_window_position()
                 self.auto_hidden_by_context = True
                 self.auto_hide_reason = reason
                 self.bubble.hide()
@@ -11131,11 +11183,35 @@ class PetWindow(QWidget):
         if random.random() < 0.35:
             self.bubble.say(random.choice(["我在想下一步怎么帮你。", "先把最小的一件事做掉也不错。"]))
 
+    def window_size_for_restore(self):
+        size = self.frameGeometry().size()
+        if size.width() <= 1 or size.height() <= 1:
+            size = self.sizeHint()
+        return QSize(max(1, size.width()), max(1, size.height()))
+
     def clamped_pos(self, pos):
-        screen = QApplication.primaryScreen().availableGeometry()
-        x = max(screen.left(), min(pos.x(), screen.right() - self.width()))
-        y = max(screen.top(), min(pos.y(), screen.bottom() - self.height()))
-        return QPoint(x, y)
+        return clamp_window_position(pos, self.window_size_for_restore())
+
+    def ensure_safe_window_position(self, save=False):
+        target = self.clamped_pos(self.pos())
+        if target != self.pos():
+            self.move(target)
+        if save:
+            self.save_window_position()
+        return target
+
+    def restore_window_position_from_config(self):
+        saved_left = int(self.config.get("WindowLeft", -1))
+        saved_top = int(self.config.get("WindowTop", -1))
+        size = self.window_size_for_restore()
+        has_saved = not (saved_left == -1 and saved_top == -1)
+        target = QPoint(saved_left, saved_top) if has_saved else default_window_position(size)
+        safe = clamp_window_position(target, size)
+        self.move(safe)
+        if not has_saved or safe != target:
+            self.config["WindowLeft"] = safe.x()
+            self.config["WindowTop"] = safe.y()
+            save_json(CONFIG, self.config)
 
     def begin_sprite_drag(self, global_pos):
         self.anim.stop()
@@ -11149,13 +11225,14 @@ class PetWindow(QWidget):
 
     def move_sprite_drag(self, global_pos):
         if self.dragging:
-            self.move(global_pos - self.drag_pos)
+            self.move(self.clamped_pos(global_pos - self.drag_pos))
 
     def end_sprite_drag(self):
         if self.dragging:
             self.dragging = False
             self.state = "待机"
             self.update_status()
+            self.ensure_safe_window_position(save=True)
             self.bubble.say("安全着陆。")
             self.dog_happy()
 
@@ -11173,7 +11250,7 @@ class PetWindow(QWidget):
 
     def mouseMoveEvent(self, event):
         if self.dragging and (event.buttons() & Qt.LeftButton):
-            self.move(event.globalPosition().toPoint() - self.drag_pos)
+            self.move(self.clamped_pos(event.globalPosition().toPoint() - self.drag_pos))
             event.accept()
 
     def mouseReleaseEvent(self, event):
@@ -11185,6 +11262,7 @@ class PetWindow(QWidget):
             self.dragging = False
             self.state = "待机"
             self.update_status()
+            self.ensure_safe_window_position(save=True)
             self.bubble.say("安全着陆。")
             event.accept()
 
@@ -11204,6 +11282,7 @@ class PetWindow(QWidget):
         self.update_desktop_label_bounds()
         save_json(CONFIG, self.config)
         self.adjustSize()
+        self.ensure_safe_window_position(save=True)
         if self.bubble.isVisible():
             self.position_bubble()
         self.bubble.say(f"大小：{size}px")
@@ -11256,6 +11335,7 @@ class PetWindow(QWidget):
     def restore_from_tray(self, *args, say=True, activate=True):
         self.auto_hidden_by_context = False
         self.auto_hide_reason = ""
+        self.ensure_safe_window_position(save=True)
         self.show()
         self.raise_()
         if activate:
@@ -11266,9 +11346,7 @@ class PetWindow(QWidget):
     def hide_to_tray(self, *args, show_notice=True):
         self.auto_hidden_by_context = False
         self.auto_hide_reason = ""
-        self.config["WindowLeft"] = self.x()
-        self.config["WindowTop"] = self.y()
-        save_json(CONFIG, self.config)
+        self.save_window_position()
         self.bubble.hide()
         self.hide()
         if self.tray and show_notice and not self.tray_notice_shown:
@@ -11749,8 +11827,11 @@ class PetWindow(QWidget):
         update_saved_bubble_offset(self.config, offset_x, offset_y)
 
     def save_window_position(self):
-        self.config["WindowLeft"] = self.x()
-        self.config["WindowTop"] = self.y()
+        safe = self.clamped_pos(self.pos())
+        if safe != self.pos():
+            self.move(safe)
+        self.config["WindowLeft"] = safe.x()
+        self.config["WindowTop"] = safe.y()
         save_json(CONFIG, self.config)
 
     def save_bubble_size(self):
