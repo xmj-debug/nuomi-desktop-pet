@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import uuid
 import webbrowser
 import zipfile
@@ -186,6 +187,30 @@ BACKUP_DATA_FILES = [
     WORDBOOK,
 ]
 SECRET_CONFIG_KEYS = {"AiApiKey", "MailPassword", "GmailPassword"}
+GITHUB_BACKUP_BLOCKED_NAMES = {
+    path.name.casefold()
+    for path in BACKUP_DATA_FILES
+}
+GITHUB_BACKUP_BLOCKED_NAMES.update(
+    {
+        "pet-notes.txt",
+        "pet-shutdown.flag",
+        "pet-update.lock",
+        "toolbox-server.err.log",
+        "toolbox-server.out.log",
+    }
+)
+GITHUB_BACKUP_BLOCKED_DIRS = {
+    "backups",
+    "updates",
+    "dist",
+    "migration-test",
+    "screenshots",
+    ".claude",
+    ".agents",
+    ".codex",
+    "__pycache__",
+}
 
 WM_HOTKEY = 0x0312
 MOD_ALT = 0x0001
@@ -382,6 +407,8 @@ DEFAULT_CONFIG = {
     "WindowLeft": -1,
     "WindowTop": -1,
     "ShowStatus": False,
+    "BubbleEnabled": True,
+    "LockPetPosition": True,
     "WatchdogEnabled": True,
     "QuietMode": False,
     "AutoQuietFullscreen": True,
@@ -403,6 +430,29 @@ DEFAULT_CONFIG = {
     "ClaudeEffort": "medium",
     "ClaudeAlwaysChinese": True,
     "ClaudeSafeMode": False,
+    "AiFeatureEnabled": True,
+    "TodayFeatureEnabled": True,
+    "TodoFeatureEnabled": True,
+    "CalendarFeatureEnabled": True,
+    "WeatherFeatureEnabled": True,
+    "MailFeatureEnabled": True,
+    "StudyFeatureEnabled": True,
+    "FormulaFeatureEnabled": True,
+    "OcrFeatureEnabled": True,
+    "TranslateFeatureEnabled": True,
+    "FileSearchFeatureEnabled": True,
+    "PerformanceFeatureEnabled": True,
+    "DesktopOrganizerFeatureEnabled": True,
+    "BackupFeatureEnabled": True,
+    "ClaudeFeatureEnabled": True,
+    "ToolboxFeatureEnabled": True,
+    "DiagnosticsFeatureEnabled": True,
+    "ActionLabFeatureEnabled": True,
+    "NotebookFeatureEnabled": True,
+    "BatteryFeatureEnabled": True,
+    "OnlineUpdateFeatureEnabled": True,
+    "GithubUploadFeatureEnabled": True,
+    "word_popup_enabled": True,
 }
 
 TEXT_STYLE_KEYS = (
@@ -428,6 +478,97 @@ BUBBLE_FRAME_KEYS = (
     "BubbleOffsetY",
 )
 STYLE_PREVIEW_KEYS = TEXT_STYLE_KEYS + BUBBLE_COLOR_KEYS + BUBBLE_FRAME_KEYS
+
+FEATURE_SWITCH_GROUPS = [
+    (
+        "日常助手",
+        [
+            ("AiFeatureEnabled", "和糯米聊聊", "AI 聊天窗口、Alt+Space 快捷键。", True),
+            ("TodayFeatureEnabled", "今日看板", "汇总待办、日程、天气、邮件和电脑状态。", True),
+            ("BubbleEnabled", "气泡显示", "桌宠说话气泡、单词气泡和提示气泡总开关。", True),
+            ("LockPetPosition", "锁定桌宠位置", "自动散步和随机动作不再把桌宠挪走，手动拖动仍会保存。", True),
+            ("TodoFeatureEnabled", "提醒事项", "待办、到期提醒和自然语言提醒入口。", True),
+            ("CalendarFeatureEnabled", "日程", "本地日程添加、查看今日和本周。", True),
+            ("WeatherFeatureEnabled", "天气", "天气刷新和天气提示。", True),
+            ("MailFeatureEnabled", "邮件", "未读邮件查看和邮件提醒入口。", True),
+        ],
+    ),
+    (
+        "学习考研",
+        [
+            ("StudyFeatureEnabled", "考研 / 学习统计", "考研倒计时、学习统计和番茄记录。", True),
+            ("word_popup_enabled", "考研单词", "单击气泡换词、随机单词弹出。", True),
+            ("FormulaFeatureEnabled", "数学公式", "考研数学公式速查。", True),
+            ("OcrFeatureEnabled", "截图 OCR", "Ctrl+Shift+A 截图识别和截图提问。", True),
+        ],
+    ),
+    (
+        "工具箱",
+        [
+            ("TranslateFeatureEnabled", "翻译", "独立翻译窗口。", True),
+            ("FileSearchFeatureEnabled", "文件搜索", "按名称和类型查找文件。", True),
+            ("PerformanceFeatureEnabled", "清理 / 性能", "临时文件扫描、磁盘空间和进程查看。", True),
+            ("DesktopOrganizerFeatureEnabled", "桌面整理", "扫描桌面并按类别整理。", True),
+            ("DiagnosticsFeatureEnabled", "诊断中心", "AI、邮箱、OCR、VPN、启动项诊断。", True),
+            ("ActionLabFeatureEnabled", "动作实验室", "测试桌宠动作和状态。", True),
+            ("NotebookFeatureEnabled", "词库 / 笔记", "词库和本地笔记入口。", True),
+            ("BatteryFeatureEnabled", "电池工具", "电池状态窗口和电池报告入口。", True),
+            ("BackupFeatureEnabled", "备份 / 迁移", "本地备份、整机迁移包和恢复。", True),
+            ("ToolboxFeatureEnabled", "核心工具箱", "打开外部工具箱服务。", True),
+            ("ClaudeFeatureEnabled", "Claude Code", "中文 Claude Code 启动器。", True),
+        ],
+    ),
+    (
+        "系统提醒",
+        [
+            ("SystemHealthWatchEnabled", "电脑异常检测", "CPU、内存、磁盘等异常提醒。", True),
+            ("BatteryAlertsEnabled", "电池提醒", "低电量、充满和电源状态提醒。", True),
+            ("AutoQuietFullscreen", "全屏自动安静", "全屏视频或游戏时减少打扰。", True),
+            ("AutoHideFullscreen", "全屏游戏自动隐藏", "全屏游戏时自动隐藏桌宠。", True),
+            ("AutoHideGames", "游戏前台自动隐藏", "检测到游戏窗口在前台时隐藏桌宠。", True),
+            ("WatchdogEnabled", "自恢复守护", "异常退出后自动拉起糯米。", True),
+        ],
+    ),
+    (
+        "高级 / 敏感",
+        [
+            ("VoiceEnabled", "语音播报", "桌宠气泡和提醒的语音朗读。", False),
+            ("ChatVoiceReplies", "AI 回复朗读", "AI 聊天回复自动朗读。", False),
+            ("ClipboardHistoryEnabled", "剪贴板记录", "记录文字剪贴板历史。", False),
+            ("AutoStart", "开机自启", "登录 Windows 后自动启动糯米。", False),
+            ("OnlineUpdateFeatureEnabled", "联网检查更新", "连接 GitHub 检查更新包。", False),
+            ("GithubUploadFeatureEnabled", "手动上传到 GitHub", "把程序代码提交并推送到 GitHub。", False),
+        ],
+    ),
+]
+
+FEATURE_SWITCH_ITEMS = [
+    {"key": key, "label": label, "description": description, "safe": safe}
+    for _group, items in FEATURE_SWITCH_GROUPS
+    for key, label, description, safe in items
+]
+FEATURE_SWITCH_LABELS = {item["key"]: item["label"] for item in FEATURE_SWITCH_ITEMS}
+FEATURE_SWITCH_KEYS = tuple(item["key"] for item in FEATURE_SWITCH_ITEMS)
+
+
+def feature_enabled(config, key):
+    config = config or {}
+    return bool(config.get(key, DEFAULT_CONFIG.get(key, True)))
+
+
+def feature_label(key):
+    return FEATURE_SWITCH_LABELS.get(key, key)
+
+
+def safe_enable_feature_config(config):
+    for item in FEATURE_SWITCH_ITEMS:
+        if item["safe"]:
+            config[item["key"]] = True
+
+
+def reset_feature_config_defaults(config):
+    for key in FEATURE_SWITCH_KEYS:
+        config[key] = DEFAULT_CONFIG.get(key, True)
 
 CHINA_HOLIDAYS_2026 = [
     {"name": "元旦", "start": "2026-01-01", "end": "2026-01-03", "days": 3},
@@ -1765,6 +1906,117 @@ def append_runtime_log(message):
         pass
 
 
+def install_exception_logger():
+    def handle_exception(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        detail = "".join(traceback.format_exception(exc_type, exc, tb)).strip()
+        append_runtime_log("uncaught exception:\n" + detail)
+        try:
+            sys.__excepthook__(exc_type, exc, tb)
+        except Exception:
+            pass
+
+    sys.excepthook = handle_exception
+
+
+def git_command(args, timeout=120, check=True):
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=str(BASE),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0,
+    )
+    if check and completed.returncode != 0:
+        output = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(output or f"git {' '.join(args)} 失败")
+    return completed
+
+
+def github_backup_is_blocked_path(value):
+    path = str(value or "").replace("\\", "/").strip("/")
+    if not path:
+        return False
+    parts = [part.casefold() for part in path.split("/") if part]
+    if not parts:
+        return False
+    if parts[0] in GITHUB_BACKUP_BLOCKED_DIRS:
+        return True
+    name = parts[-1]
+    if name in GITHUB_BACKUP_BLOCKED_NAMES:
+        return True
+    if name.endswith(".log") or name.endswith(".pyc"):
+        return True
+    if name.startswith("python-") and name.endswith(".exe"):
+        return True
+    if name.startswith("ui_audit_") and name.endswith(".png"):
+        return True
+    if len(parts) >= 2 and parts[0] == "tools" and name.endswith(".exe"):
+        return True
+    return False
+
+
+def manual_github_backup():
+    if not (BASE / ".git").exists():
+        raise RuntimeError("当前项目不是 Git 仓库，无法上传到 GitHub。")
+    remote_result = git_command(["remote", "get-url", "--push", "origin"], timeout=20)
+    remote_url = remote_result.stdout.strip()
+    if not remote_url:
+        raise RuntimeError("没有配置 GitHub 远程仓库 origin。")
+    branch_result = git_command(["branch", "--show-current"], timeout=20)
+    branch = branch_result.stdout.strip()
+    if not branch:
+        raise RuntimeError("当前不是普通分支，无法自动上传。")
+
+    tracked_result = git_command(["ls-files"], timeout=30)
+    blocked_tracked = [
+        item for item in tracked_result.stdout.splitlines()
+        if github_backup_is_blocked_path(item)
+    ]
+    if blocked_tracked:
+        preview = "、".join(blocked_tracked[:6])
+        more = f" 等 {len(blocked_tracked)} 个文件" if len(blocked_tracked) > 6 else ""
+        raise RuntimeError(f"检测到敏感文件已经被 Git 跟踪：{preview}{more}。请先移出仓库后再上传。")
+
+    name_ready = bool(git_command(["config", "user.name"], check=False, timeout=10).stdout.strip())
+    mail_ready = bool(git_command(["config", "user.email"], check=False, timeout=10).stdout.strip())
+    if not (name_ready and mail_ready):
+        raise RuntimeError("Git 用户名或邮箱未配置，无法创建提交。请先配置 git user.name 和 user.email。")
+
+    git_command(["add", "-A", "--", "."], timeout=120)
+    staged_result = git_command(["diff", "--cached", "--name-only"], timeout=30)
+    staged_files = [line.strip() for line in staged_result.stdout.splitlines() if line.strip()]
+    blocked_staged = [item for item in staged_files if github_backup_is_blocked_path(item)]
+    if blocked_staged:
+        git_command(["restore", "--staged", "--", *blocked_staged], timeout=30, check=False)
+        preview = "、".join(blocked_staged[:6])
+        more = f" 等 {len(blocked_staged)} 个文件" if len(blocked_staged) > 6 else ""
+        raise RuntimeError(f"本次上传被拦截：这些文件看起来像个人数据或敏感文件：{preview}{more}。")
+
+    committed = False
+    commit_message = f"糯米手动备份 {datetime.now():%Y-%m-%d %H:%M}"
+    if staged_files:
+        git_command(["commit", "-m", commit_message], timeout=120)
+        committed = True
+    commit_hash = git_command(["rev-parse", "--short", "HEAD"], timeout=20).stdout.strip()
+    push_result = git_command(["push", "origin", branch], timeout=300)
+    push_output = (push_result.stdout or push_result.stderr or "").strip()
+    append_runtime_log(f"github backup pushed branch={branch} commit={commit_hash} files={len(staged_files)}")
+    return {
+        "remote": remote_url,
+        "branch": branch,
+        "commit": commit_hash,
+        "committed": committed,
+        "files": staged_files,
+        "push_output": push_output,
+    }
+
+
 def pythonw_executable():
     current = Path(sys.executable)
     if current.name.lower() == "python.exe":
@@ -2178,7 +2430,7 @@ def claude_code_profile():
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=4,
+                timeout=1.2,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform.startswith("win") else 0,
             )
             profile["version"] = (result.stdout or result.stderr or "").strip()
@@ -2634,6 +2886,38 @@ def weather_desc_zh(text):
         return value
     key = normalize_weather_key(value)
     return WEATHER_TRANSLATIONS.get(key) or fallback_weather_desc_zh(key)
+
+
+def compact_inline_text(text, max_chars=22):
+    value = re.sub(r"\s+", " ", str(text or "").replace("\n", " ")).strip()
+    if max_chars <= 1:
+        return value
+    return value if len(value) <= max_chars else value[: max_chars - 1].rstrip() + "…"
+
+
+def compact_card_detail(text, max_lines=2, max_chars=22):
+    value = str(text or "").strip()
+    if not value:
+        return ""
+    segments = []
+    for raw_line in value.splitlines():
+        line = re.sub(r"\s+", " ", raw_line).strip()
+        if not line:
+            continue
+        parts = [part.strip() for part in re.split(r"(?<=[；;。])\s*", line) if part.strip()]
+        segments.extend(parts or [line])
+    if not segments:
+        segments = [value]
+    return "\n".join(compact_inline_text(segment, max_chars) for segment in segments[:max_lines])
+
+
+def weather_card_text(text):
+    value = str(text or "").strip()
+    if not value:
+        return "天气读取中"
+    if value.startswith("天气查询失败"):
+        return "天气查询失败\n点开重试"
+    return compact_card_detail(value, max_lines=2, max_chars=18)
 
 
 def format_minutes(minutes):
@@ -3598,6 +3882,21 @@ def bubble_tail_tip_x(width, config=None, side="left", target_x=None):
     return min_tip if side == "left" else max_tip
 
 
+def pet_bubble_anchor_x(target_rect, avoid_center=False, side_hint=1):
+    center = target_rect.center().x()
+    if not avoid_center:
+        return center
+    width = max(1, target_rect.width())
+    margin = max(8, min(24, width // 5))
+    left = target_rect.left() + margin
+    right = target_rect.right() - margin
+    if right <= left:
+        return center
+    shoulder_offset = max(18, min(72, int(width * 0.28)))
+    side = -1 if side_hint < 0 else 1
+    return min(max(center + side * shoulder_offset, left), right)
+
+
 def bubble_font_qss(config=None):
     size = text_font_sizes(config)["bubble"]
     family = qss_font_family(config)
@@ -3869,6 +4168,24 @@ QDialog#smartMenu{{
     border:1px solid rgba(148,163,184,95);
     border-radius:18px;
 }}
+QScrollArea#smartMenuScroll,QWidget#smartMenuContent{{
+    background:transparent;
+    border:none;
+}}
+QDialog#smartMenu QScrollBar:vertical{{
+    background:rgba(15,23,42,80);
+    width:8px;
+    margin:4px 0 4px 0;
+    border-radius:4px;
+}}
+QDialog#smartMenu QScrollBar::handle:vertical{{
+    background:rgba(148,163,184,150);
+    border-radius:4px;
+    min-height:28px;
+}}
+QDialog#smartMenu QScrollBar::add-line:vertical,QDialog#smartMenu QScrollBar::sub-line:vertical{{
+    height:0;
+}}
 QLabel#smartTitle{{
     color:#f8fafc;
     font:700 {title}px "{family}";
@@ -3903,7 +4220,7 @@ QPushButton#smartMetricButton{{
     background:rgba(17,24,39,188);
     border:1px solid rgba(148,163,184,92);
     border-radius:12px;
-    padding:9px 10px;
+    padding:8px 10px;
     text-align:left;
     font:{base}px "{family}";
 }}
@@ -3915,6 +4232,13 @@ QLabel#smartMetricTitle{{
     color:#fbbf24;
     font:700 {section}px "{family}";
     padding:0 0 2px 0;
+}}
+QLabel#smartMetricDetail{{
+    color:#e5e7eb;
+    background:transparent;
+    border:none;
+    padding:0;
+    font:{base}px "{family}";
 }}
 QPushButton#smartPrimary{{
     background:rgba(14,165,233,210);
@@ -5153,6 +5477,7 @@ class Bubble(QLabel):
         self._resizing_bubble = False
         self.tail_side = "right"
         self.tail_tip_x = 0
+        self.avoid_pet_center_tail = False
 
     def apply_font_config(self, config):
         self.config = config or DEFAULT_CONFIG
@@ -5198,7 +5523,7 @@ class Bubble(QLabel):
         border_extra = frame["width"] * 2 + 6
         min_total_width = max(96, int(size * 5.2))
         max_total_width = 520
-        max_total_height = 360
+        max_total_height = 420
         min_total_height = max(38, int(size * 2.35))
         metrics = self.fontMetrics()
         lines = str(text or "").splitlines() or [""]
@@ -5256,10 +5581,19 @@ class Bubble(QLabel):
         painter.end()
         super().paintEvent(event)
 
-    def say(self, text, ms=5200, fixed_size=None):
-        if self.owner is not None and not self.owner.isVisible():
-            return
+    def say(self, text, ms=5200, fixed_size=None, avoid_pet_center_tail=False):
+        if self.owner is not None:
+            if hasattr(self.owner, "should_suppress_bubble") and self.owner.should_suppress_bubble():
+                if hasattr(self.owner, "hide_bubble_now"):
+                    self.owner.hide_bubble_now()
+                else:
+                    self._click_cb = None
+                    self.hide()
+                return
+            if not self.owner.isVisible():
+                return
         self._click_cb = None
+        self.avoid_pet_center_tail = bool(avoid_pet_center_tail)
         wrapped = self.wrap_friendly_text(text)
         self.setText(wrapped)
         width, height = bubble_manual_size(self.config)
@@ -5328,6 +5662,8 @@ class Bubble(QLabel):
                     target = self._owner_start_pos + delta
                     if hasattr(self.owner, "clamped_pos"):
                         target = self.owner.clamped_pos(target)
+                    if hasattr(self.owner, "position_save_anchor"):
+                        self.owner.position_save_anchor = None
                     self.owner.move(target)
                     if hasattr(self.owner, "position_bubble"):
                         self.owner.position_bubble()
@@ -5677,7 +6013,7 @@ class AiWorker(QThread):
                 self.config.get("AiEndpoint"),
                 json=body,
                 headers=headers,
-                timeout=90,
+                timeout=httpx.Timeout(45.0, connect=8.0, read=20.0, write=20.0, pool=8.0),
             ) as response:
                 response.raise_for_status()
                 for line in response.iter_lines():
@@ -5735,6 +6071,70 @@ class VoiceInputWorker(QThread):
             self.result.emit("", str(exc))
 
 
+class OcrWorker(QThread):
+    result = Signal(object)
+
+    def __init__(self, config, image_path):
+        super().__init__()
+        self.config = dict(config)
+        self.image_path = Path(image_path)
+
+    def run(self):
+        try:
+            content, error = run_tesseract_ocr(self.config, self.image_path)
+            self.result.emit({"ok": True, "path": str(self.image_path), "content": content, "error": error})
+        except Exception as exc:
+            self.result.emit({"ok": False, "path": str(self.image_path), "content": "", "error": f"OCR 失败：{exc}"})
+
+
+DETACHED_WORKERS = []
+
+
+def disconnect_worker_signal(worker, signal_name):
+    signal = getattr(worker, signal_name, None)
+    if signal is None:
+        return
+    try:
+        signal.disconnect()
+    except Exception:
+        pass
+
+
+def keep_worker_alive(worker):
+    if worker is None or worker in DETACHED_WORKERS:
+        return
+    DETACHED_WORKERS.append(worker)
+
+    def cleanup():
+        try:
+            DETACHED_WORKERS.remove(worker)
+        except ValueError:
+            pass
+        try:
+            worker.deleteLater()
+        except Exception:
+            pass
+
+    try:
+        worker.finished.connect(cleanup)
+    except Exception:
+        pass
+
+
+def detach_running_worker(worker, signal_names=(), cancel=False):
+    if worker is None or not worker.isRunning():
+        return False
+    for signal_name in signal_names:
+        disconnect_worker_signal(worker, signal_name)
+    keep_worker_alive(worker)
+    if cancel and hasattr(worker, "cancel"):
+        try:
+            worker.cancel()
+        except Exception:
+            pass
+    return True
+
+
 class PromptEdit(QPlainTextEdit):
     send_requested = Signal()
 
@@ -5751,6 +6151,7 @@ class AiDialog(QDialog):
         self.config = config
         self.worker = None
         self.voice_worker = None
+        self.ocr_worker = None
         self.tts_worker = None
         self.pending_delta = ""
         self.pending_reminder_note = ""
@@ -5878,6 +6279,7 @@ class AiDialog(QDialog):
         self.worker = AiWorker(self.config, self.mode.currentText(), question)
         self.worker.delta.connect(self.buffer_delta)
         self.worker.done.connect(lambda answer: self.finish_answer(question, answer))
+        self.worker.finished.connect(lambda: setattr(self, "worker", None))
         self.worker.start()
 
     def cancel(self):
@@ -5885,6 +6287,9 @@ class AiDialog(QDialog):
             self.worker.cancel()
 
     def capture_to_input(self):
+        if self.ocr_worker and self.ocr_worker.isRunning():
+            self.input.setPlainText("上一张截图正在 OCR 识别，请稍等。")
+            return
         self.hide()
         QApplication.processEvents()
         snip = SnipDialog()
@@ -5903,7 +6308,16 @@ class AiDialog(QDialog):
         self.show()
         path = SCREENSHOTS / f"ai-screenshot-{datetime.now():%Y%m%d-%H%M%S}.png"
         shot.save(str(path))
-        content, error = run_tesseract_ocr(self.config, path)
+        self.input.setPlainText(f"截图已保存，正在 OCR 识别...\n截图路径：{path}")
+        self.ocr_worker = OcrWorker(self.config, path)
+        self.ocr_worker.result.connect(self.apply_captured_ocr)
+        self.ocr_worker.finished.connect(lambda: setattr(self, "ocr_worker", None))
+        self.ocr_worker.start()
+
+    def apply_captured_ocr(self, result):
+        content = result.get("content", "")
+        error = result.get("error", "")
+        path = result.get("path", "")
         if content:
             self.input.setPlainText("请解释这段截图 OCR 内容：\n" + content)
         else:
@@ -5916,6 +6330,7 @@ class AiDialog(QDialog):
         self.input.setPlaceholderText("正在听你说话，最多 8 秒...")
         self.voice_worker = VoiceInputWorker()
         self.voice_worker.result.connect(self.apply_voice_text)
+        self.voice_worker.finished.connect(lambda: setattr(self, "voice_worker", None))
         self.voice_worker.start()
 
     def voice_chat(self):
@@ -5928,6 +6343,7 @@ class AiDialog(QDialog):
         self.history.append("\n糯米正在听你说话...")
         self.voice_worker = VoiceInputWorker()
         self.voice_worker.result.connect(self.apply_voice_text)
+        self.voice_worker.finished.connect(lambda: setattr(self, "voice_worker", None))
         self.voice_worker.start()
 
     def apply_voice_text(self, text, error):
@@ -5997,7 +6413,20 @@ class AiDialog(QDialog):
             speech,
             self.config,
         )
+        self.tts_worker.finished.connect(lambda: setattr(self, "tts_worker", None))
         self.tts_worker.start()
+
+    def closeEvent(self, event):
+        self.delta_timer.stop()
+        detach_running_worker(self.worker, ("delta", "done", "finished"), cancel=True)
+        detach_running_worker(self.voice_worker, ("result", "finished"))
+        detach_running_worker(self.ocr_worker, ("result", "finished"))
+        detach_running_worker(self.tts_worker, ("finished",))
+        self.worker = None
+        self.voice_worker = None
+        self.ocr_worker = None
+        self.tts_worker = None
+        super().closeEvent(event)
 
 
 class SnipDialog(QDialog):
@@ -6334,9 +6763,9 @@ class MailComposeDialog(QDialog):
 
     def closeEvent(self, event):
         if self.worker and self.worker.isRunning():
-            self.worker.terminate()
-            self.worker.wait(1500)
-            self.worker = None
+            self.send_btn.setText("发送中，请稍等...")
+            event.ignore()
+            return
         super().closeEvent(event)
 
 
@@ -6506,14 +6935,8 @@ class MailDialog(QDialog):
 
     def closeEvent(self, event):
         self.closing = True
-        if self.worker and self.worker.isRunning():
-            try:
-                self.worker.result.disconnect()
-            except Exception:
-                pass
-            self.worker.terminate()
-            self.worker.wait(1500)
-            self.worker = None
+        detach_running_worker(self.worker, ("result", "finished"))
+        self.worker = None
         super().closeEvent(event)
 
     def open_selected(self):
@@ -6932,6 +7355,16 @@ def clean_tts_text(text, limit=900):
     return value
 
 
+class TtsVoiceListWorker(QThread):
+    result = Signal(object)
+
+    def run(self):
+        try:
+            self.result.emit({"ok": True, "voices": installed_tts_voices()})
+        except Exception as exc:
+            self.result.emit({"ok": False, "voices": [], "error": str(exc)})
+
+
 def voice_policy_allows(config, kind="ambient", context_busy=False, last_ambient_at=0.0, now=None):
     config = config or {}
     kind = str(kind or "ambient").lower()
@@ -7120,13 +7553,42 @@ class WeatherWorker(QThread):
             self.result.emit(f"天气查询失败：{exc}")
 
 
+class AssistantToolboxWorker(QThread):
+    result = Signal(bool, str)
+
+    def run(self):
+        try:
+            ok, message = ensure_assistant_toolbox_server()
+        except Exception as exc:
+            ok, message = False, f"核心工具箱启动失败：{exc}"
+        self.result.emit(ok, message)
+
+
+class StartupMaintenanceWorker(QThread):
+    result = Signal(str)
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = dict(config or {})
+
+    def run(self):
+        try:
+            configured_tesseract_path(self.config, persist=True)
+            sync_startup_entry(self.config)
+            sync_watchdog(self.config)
+            self.result.emit("startup maintenance finished")
+        except Exception as exc:
+            self.result.emit(f"startup maintenance failed: {type(exc).__name__}: {exc}")
+
+
 class WeatherDialog(QDialog):
     def __init__(self, config, parent=None):
         super().__init__(parent)
         self.config = config
         self.worker = None
         self.setWindowTitle("天气")
-        self.resize(460, 260)
+        self.resize(520, 320)
+        self.setMinimumSize(420, 280)
         self.setSizeGripEnabled(True)
         self.setStyleSheet(APP_DIALOG_STYLE)
         layout = QVBoxLayout(self)
@@ -7150,22 +7612,42 @@ class WeatherDialog(QDialog):
         row.addWidget(refresh)
         row.addWidget(save)
         layout.addLayout(row)
-        self.result = QLabel("点击查询获取天气。")
+        self.result = QTextEdit()
         self.result.setObjectName("panel")
-        self.result.setWordWrap(True)
-        layout.addWidget(self.result)
+        self.result.setReadOnly(True)
+        self.result.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.result.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.result.setPlainText("点击查询获取天气。")
+        self.result.setMinimumHeight(120)
+        self.result.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout.addWidget(self.result, 1)
         self.refresh()
 
     def refresh(self):
-        self.result.setText("正在查询天气...")
+        if self.worker and self.worker.isRunning():
+            self.result.setPlainText("天气正在查询，稍等一下。")
+            return
+        self.result.setPlainText("正在查询天气...")
         self.worker = WeatherWorker(self.city.text().strip() or "上海")
-        self.worker.result.connect(self.result.setText)
+        self.worker.result.connect(self.set_result)
+        self.worker.finished.connect(lambda: setattr(self, "worker", None))
         self.worker.start()
+
+    def set_result(self, text):
+        self.result.setPlainText(str(text or ""))
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "set_weather"):
+            parent.set_weather(text, show_bubble=False)
 
     def save_city(self):
         self.config["WeatherCity"] = self.city.text().strip() or "上海"
         save_json(CONFIG, self.config)
-        self.result.setText(f"默认城市已保存：{self.config['WeatherCity']}")
+        self.result.setPlainText(f"默认城市已保存：{self.config['WeatherCity']}")
+
+    def closeEvent(self, event):
+        detach_running_worker(self.worker, ("result", "finished"))
+        self.worker = None
+        super().closeEvent(event)
 
 
 class TodoDialog(QDialog):
@@ -7466,10 +7948,21 @@ class StudyDialog(QDialog):
         self.summary.setPlainText("\n".join(lines))
 
 
+class ClaudeProfileWorker(QThread):
+    result = Signal(object)
+
+    def run(self):
+        try:
+            self.result.emit(claude_code_profile())
+        except Exception as exc:
+            self.result.emit({"error": str(exc), "installed": False})
+
+
 class ClaudeCodeLauncherDialog(QDialog):
     def __init__(self, config, parent=None):
         super().__init__(parent)
         self.config = config
+        self.profile_worker = None
         self.setWindowTitle("Claude Code 中文启动器")
         self.resize(720, 650)
         self.setMinimumSize(620, 560)
@@ -7611,7 +8104,18 @@ class ClaudeCodeLauncherDialog(QDialog):
         combo.setCurrentIndex(index if index >= 0 else 0)
 
     def refresh_status(self):
-        profile = claude_code_profile()
+        if self.profile_worker and self.profile_worker.isRunning():
+            return
+        self.status.setText("环境状态：正在检查 Claude Code...")
+        self.profile_worker = ClaudeProfileWorker()
+        self.profile_worker.result.connect(self.render_status)
+        self.profile_worker.finished.connect(lambda: setattr(self, "profile_worker", None))
+        self.profile_worker.start()
+
+    def render_status(self, profile):
+        if profile.get("error"):
+            self.status.setText(f"环境状态：检查失败：{profile.get('error')}")
+            return
         if not profile["installed"]:
             self.status.setText("环境状态：未找到 Claude Code，请先安装或修复 Claude Code。")
             return
@@ -7622,6 +8126,11 @@ class ClaudeCodeLauncherDialog(QDialog):
             f"环境状态：{version} | {settings} | 接口 {profile['provider']} | "
             f"模型 {profile['model']} | {credential}"
         )
+
+    def closeEvent(self, event):
+        detach_running_worker(self.profile_worker, ("result", "finished"))
+        self.profile_worker = None
+        super().closeEvent(event)
 
     def choose_project(self):
         start = self.project.currentText().strip() or str(BASE)
@@ -7721,7 +8230,7 @@ class TodayBoardDialog(QDialog):
         section_items = [
             ("下一步行动", next_lines),
             ("待办 / 日程", upcoming_todo_lines(4) + [""] + upcoming_event_lines(4)),
-            ("天气 / 邮件", [getattr(pet, "weather_text", f"{pet.config.get('WeatherCity', '上海')} 天气读取中"), mail_dashboard_text()]),
+            ("天气 / 邮件", [weather_card_text(getattr(pet, "weather_text", f"{pet.config.get('WeatherCity', '上海')} 天气读取中")), mail_dashboard_text()]),
             ("电脑状态", compact_health_lines(pet.config)),
             ("电池 / 电源", battery_status_lines(pet.config)),
             ("考研 / 学习", today_study_lines(pet.config)),
@@ -7764,6 +8273,8 @@ class TodayBoardDialog(QDialog):
         panel = QTextEdit()
         panel.setReadOnly(True)
         panel.setObjectName("panel")
+        panel.setLineWrapMode(QTextEdit.WidgetWidth)
+        panel.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         panel.setMinimumHeight(104)
         panel.setMaximumHeight(150)
         content = [title, ""]
@@ -7858,6 +8369,7 @@ class TranslateDialog(QDialog):
         self.worker = AiWorker(self.config, "翻译", prompt)
         self.worker.delta.connect(self.queue_delta)
         self.worker.done.connect(self.finish)
+        self.worker.finished.connect(lambda: setattr(self, "worker", None))
         self.delta_timer.start()
         self.worker.start()
 
@@ -7880,6 +8392,12 @@ class TranslateDialog(QDialog):
     def cancel(self):
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
+
+    def closeEvent(self, event):
+        self.delta_timer.stop()
+        detach_running_worker(self.worker, ("delta", "done", "finished"), cancel=True)
+        self.worker = None
+        super().closeEvent(event)
 
 
 class ClipboardDialog(QDialog):
@@ -8019,12 +8537,161 @@ class OnlineUpdateWorker(QThread):
             self.result.emit({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
 
+class GitHubBackupWorker(QThread):
+    result = Signal(object)
+
+    def run(self):
+        try:
+            self.result.emit({"ok": True, **manual_github_backup()})
+        except Exception as exc:
+            self.result.emit({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+
+class BackupExportWorker(QThread):
+    result = Signal(object)
+
+    def __init__(self, mode, path, include_secrets=False, include_clipboard=True):
+        super().__init__()
+        self.mode = mode
+        self.path = path
+        self.include_secrets = include_secrets
+        self.include_clipboard = include_clipboard
+
+    def run(self):
+        try:
+            if self.mode == "portable":
+                target = create_portable_package(
+                    self.path,
+                    include_secrets=self.include_secrets,
+                    include_clipboard=self.include_clipboard,
+                )
+            else:
+                target = create_backup_archive(
+                    self.path,
+                    include_secrets=self.include_secrets,
+                    include_clipboard=self.include_clipboard,
+                )
+            self.result.emit({"ok": True, "mode": self.mode, "target": str(target)})
+        except Exception as exc:
+            self.result.emit({"ok": False, "mode": self.mode, "error": f"{type(exc).__name__}: {exc}"})
+
+
+class BackupRestoreWorker(QThread):
+    result = Signal(object)
+
+    def __init__(self, path, restore_secrets=False):
+        super().__init__()
+        self.path = path
+        self.restore_secrets = restore_secrets
+
+    def run(self):
+        try:
+            restored = restore_backup_archive(self.path, restore_secrets=self.restore_secrets)
+            self.result.emit({"ok": True, "restored": restored})
+        except Exception as exc:
+            self.result.emit({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+
+class FeatureSwitchDialog(QDialog):
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.checks = {}
+        self.setWindowTitle("功能开关")
+        self.resize(720, 680)
+        self.setMinimumSize(580, 520)
+        self.setSizeGripEnabled(True)
+        self.setStyleSheet(APP_DIALOG_STYLE)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(12)
+
+        title = QLabel("功能开关")
+        title.setObjectName("title")
+        root.addWidget(title)
+
+        hint = QLabel("关闭后会停用对应后台行为，并从右键快捷菜单隐藏入口。设置、功能开关、隐藏和退出会一直保留。")
+        hint.setObjectName("hint")
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        panel = QWidget()
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(10)
+
+        for group_name, items in FEATURE_SWITCH_GROUPS:
+            section = QLabel(group_name)
+            section.setObjectName("sectionTitle")
+            panel_layout.addWidget(section)
+            for key, label, description, _safe in items:
+                row = QFrame()
+                row.setObjectName("panel")
+                row_layout = QHBoxLayout(row)
+                row_layout.setContentsMargins(12, 10, 12, 10)
+                row_layout.setSpacing(10)
+                text = QLabel(f"<b>{label}</b><br><span style='color:#94a3b8'>{description}</span>")
+                text.setWordWrap(True)
+                check = QCheckBox("开启")
+                check.setChecked(feature_enabled(config, key))
+                self.checks[key] = check
+                row_layout.addWidget(text, 1)
+                row_layout.addWidget(check)
+                panel_layout.addWidget(row)
+        panel_layout.addStretch(1)
+        scroll.setWidget(panel)
+        root.addWidget(scroll, 1)
+
+        actions = QHBoxLayout()
+        safe_all = QPushButton("安全全开启")
+        defaults = QPushButton("恢复默认")
+        cancel = QPushButton("取消")
+        save = QPushButton("保存")
+        safe_all.setObjectName("sendButton")
+        defaults.setObjectName("ghostButton")
+        cancel.setObjectName("ghostButton")
+        save.setObjectName("sendButton")
+        safe_all.clicked.connect(self.safe_enable_all)
+        defaults.clicked.connect(self.restore_defaults)
+        cancel.clicked.connect(self.reject)
+        save.clicked.connect(self.save)
+        actions.addWidget(safe_all)
+        actions.addWidget(defaults)
+        actions.addStretch(1)
+        actions.addWidget(cancel)
+        actions.addWidget(save)
+        root.addLayout(actions)
+
+    def safe_enable_all(self):
+        for item in FEATURE_SWITCH_ITEMS:
+            if item["safe"]:
+                self.checks[item["key"]].setChecked(True)
+
+    def restore_defaults(self):
+        for key, check in self.checks.items():
+            check.setChecked(bool(DEFAULT_CONFIG.get(key, True)))
+
+    def save(self):
+        for key, check in self.checks.items():
+            self.config[key] = check.isChecked()
+        save_json(CONFIG, self.config)
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "apply_feature_switch_changes"):
+            parent.apply_feature_switch_changes()
+        self.accept()
+
+
 class BackupDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("备份 / 迁移")
-        self.resize(620, 420)
-        self.setMinimumSize(520, 360)
+        self.resize(700, 500)
+        self.setMinimumSize(560, 420)
         self.setSizeGripEnabled(True)
         self.setStyleSheet(APP_DIALOG_STYLE)
         layout = QVBoxLayout(self)
@@ -8060,10 +8727,13 @@ class BackupDialog(QDialog):
         row = QHBoxLayout()
         export_btn = QPushButton("导出备份")
         portable_btn = QPushButton("导出整机迁移包")
+        self.export_btn = export_btn
+        self.portable_btn = portable_btn
         self.update_btn = QPushButton("检查联网更新")
         import_btn = QPushButton("导入备份")
         folder_btn = QPushButton("打开文件夹")
         close_btn = QPushButton("关闭")
+        self.import_btn = import_btn
         export_btn.setObjectName("sendButton")
         portable_btn.setObjectName("sendButton")
         self.update_btn.setObjectName("sendButton")
@@ -8084,9 +8754,29 @@ class BackupDialog(QDialog):
         row.addStretch(1)
         row.addWidget(close_btn)
         layout.addLayout(row)
+
+        github_row = QHBoxLayout()
+        self.github_backup_btn = QPushButton("手动上传到 GitHub")
+        self.github_backup_btn.setObjectName("sendButton")
+        self.github_backup_btn.clicked.connect(self.upload_github_backup)
+        github_hint = QLabel("上传程序代码到 GitHub 仓库；不会上传 pet-config.json、聊天记录、邮箱状态、备份包和截图。")
+        github_hint.setObjectName("hint")
+        github_hint.setWordWrap(True)
+        github_row.addWidget(self.github_backup_btn)
+        github_row.addWidget(github_hint, 1)
+        layout.addLayout(github_row)
+        self.update_btn.setVisible(feature_enabled(load_config(), "OnlineUpdateFeatureEnabled"))
+        self.github_backup_btn.setVisible(feature_enabled(load_config(), "GithubUploadFeatureEnabled"))
+        github_hint.setVisible(feature_enabled(load_config(), "GithubUploadFeatureEnabled"))
         self.update_worker = None
+        self.github_backup_worker = None
+        self.backup_export_worker = None
+        self.backup_restore_worker = None
 
     def check_online_update(self):
+        if not feature_enabled(load_config(), "OnlineUpdateFeatureEnabled"):
+            QMessageBox.information(self, "功能已关闭", "联网检查更新已在功能开关里关闭。")
+            return
         if self.update_worker and self.update_worker.isRunning():
             return
         self.update_btn.setEnabled(False)
@@ -8122,25 +8812,57 @@ class BackupDialog(QDialog):
         self.status.setText("正在重启并安装更新……")
         QApplication.quit()
 
+    def upload_github_backup(self):
+        if self.github_backup_worker and self.github_backup_worker.isRunning():
+            return
+        if not feature_enabled(load_config(), "GithubUploadFeatureEnabled"):
+            QMessageBox.information(self, "功能已关闭", "手动上传到 GitHub 已在功能开关里关闭。")
+            return
+        reply = QMessageBox.question(
+            self,
+            "手动上传到 GitHub",
+            "将把当前程序代码提交并推送到 GitHub origin。\n\n"
+            "不会上传 pet-config.json、聊天记录、剪贴板、邮箱状态、备份包、截图等个人数据。\n\n"
+            "现在开始上传吗？",
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.github_backup_btn.setEnabled(False)
+        self.status.setText("正在手动上传到 GitHub：检查敏感文件、创建提交并推送到远程仓库……")
+        self.github_backup_worker = GitHubBackupWorker(self)
+        self.github_backup_worker.result.connect(self.github_backup_finished)
+        self.github_backup_worker.start()
+
+    def github_backup_finished(self, result):
+        self.github_backup_btn.setEnabled(True)
+        if not result.get("ok"):
+            error = result.get("error", "未知错误")
+            self.status.setText("GitHub 手动上传失败：" + error)
+            QMessageBox.warning(self, "GitHub 上传失败", error)
+            return
+        files = result.get("files", [])
+        branch = result.get("branch", "")
+        commit_hash = result.get("commit", "")
+        if result.get("committed"):
+            summary = f"已上传到 GitHub：分支 {branch}，提交 {commit_hash}，包含 {len(files)} 个文件。"
+        else:
+            summary = f"GitHub 已检查：没有新的本地改动，远程分支 {branch} 已是提交 {commit_hash}。"
+        self.status.setText(summary)
+        QMessageBox.information(self, "GitHub 上传完成", summary)
+
     def export_backup(self):
+        if self.backup_task_running():
+            return
         BACKUP_DIR.mkdir(exist_ok=True)
         default_name = BACKUP_DIR / f"nuomi-backup-{datetime.now():%Y%m%d-%H%M%S}.zip"
         path, _ = QFileDialog.getSaveFileName(self, "导出糯米备份", str(default_name), "Zip backup (*.zip)")
         if not path:
             return
-        try:
-            target = create_backup_archive(
-                path,
-                include_secrets=self.include_secrets.isChecked(),
-                include_clipboard=self.include_clipboard.isChecked(),
-            )
-        except Exception as exc:
-            QMessageBox.warning(self, "备份失败", str(exc))
-            return
-        self.status.setText(f"已导出：{target}")
-        QMessageBox.information(self, "备份完成", "糯米的备份已经导出。")
+        self.start_backup_export("backup", path)
 
     def export_portable_package(self):
+        if self.backup_task_running():
+            return
         BACKUP_DIR.mkdir(exist_ok=True)
         if not self.include_secrets.isChecked():
             reply = QMessageBox.question(
@@ -8157,30 +8879,75 @@ class BackupDialog(QDialog):
         path, _ = QFileDialog.getSaveFileName(self, "导出糯米整机迁移包", str(default_name), "Portable package (*.zip)")
         if not path:
             return
-        try:
-            target = create_portable_package(
-                path,
-                include_secrets=self.include_secrets.isChecked(),
-                include_clipboard=self.include_clipboard.isChecked(),
-            )
-        except Exception as exc:
-            QMessageBox.warning(self, "迁移包导出失败", str(exc))
+        self.start_backup_export("portable", path)
+
+    def start_backup_export(self, mode, path):
+        self.set_backup_buttons_enabled(False)
+        title = "整机迁移包" if mode == "portable" else "备份"
+        self.status.setText(f"正在导出{title}，窗口可继续响应，请稍等...")
+        self.backup_export_worker = BackupExportWorker(
+            mode,
+            path,
+            include_secrets=self.include_secrets.isChecked(),
+            include_clipboard=self.include_clipboard.isChecked(),
+        )
+        self.backup_export_worker.result.connect(self.backup_export_finished)
+        self.backup_export_worker.finished.connect(lambda: setattr(self, "backup_export_worker", None))
+        self.backup_export_worker.start()
+
+    def backup_export_finished(self, result):
+        self.set_backup_buttons_enabled(True)
+        mode = result.get("mode", "backup")
+        if not result.get("ok"):
+            title = "迁移包导出失败" if mode == "portable" else "备份失败"
+            error = result.get("error", "未知错误")
+            self.status.setText(title + "：" + error)
+            QMessageBox.warning(self, title, error)
             return
-        self.status.setText(f"已导出整机迁移包：{target}\n新电脑解压后双击 START_HERE.bat。")
-        QMessageBox.information(self, "迁移包完成", "糯米整机迁移包已导出。\n新电脑解压后双击 START_HERE.bat。")
+        target = result.get("target", "")
+        if mode == "portable":
+            self.status.setText(f"已导出整机迁移包：{target}\n新电脑解压后双击 START_HERE.bat。")
+            QMessageBox.information(self, "迁移包完成", "糯米整机迁移包已导出。\n新电脑解压后双击 START_HERE.bat。")
+        else:
+            self.status.setText(f"已导出：{target}")
+            QMessageBox.information(self, "备份完成", "糯米的备份已经导出。")
 
     def import_backup(self):
+        if self.backup_task_running():
+            return
         path, _ = QFileDialog.getOpenFileName(self, "导入糯米备份", str(BACKUP_DIR), "Zip backup (*.zip)")
         if not path:
             return
         reply = QMessageBox.question(self, "确认导入", "导入会覆盖当前糯米数据。要继续吗？")
         if reply != QMessageBox.Yes:
             return
-        try:
-            restored = restore_backup_archive(path, restore_secrets=self.restore_secrets.isChecked())
-        except Exception as exc:
-            QMessageBox.warning(self, "导入失败", str(exc))
+        self.start_backup_restore(path)
+
+    def backup_task_running(self):
+        workers = [self.backup_export_worker, self.backup_restore_worker]
+        return any(worker is not None and worker.isRunning() for worker in workers)
+
+    def set_backup_buttons_enabled(self, enabled):
+        self.export_btn.setEnabled(enabled)
+        self.portable_btn.setEnabled(enabled)
+        self.import_btn.setEnabled(enabled)
+
+    def start_backup_restore(self, path):
+        self.set_backup_buttons_enabled(False)
+        self.status.setText("正在导入备份，窗口可继续响应，请稍等...")
+        self.backup_restore_worker = BackupRestoreWorker(path, restore_secrets=self.restore_secrets.isChecked())
+        self.backup_restore_worker.result.connect(self.backup_restore_finished)
+        self.backup_restore_worker.finished.connect(lambda: setattr(self, "backup_restore_worker", None))
+        self.backup_restore_worker.start()
+
+    def backup_restore_finished(self, result):
+        self.set_backup_buttons_enabled(True)
+        if not result.get("ok"):
+            error = result.get("error", "未知错误")
+            self.status.setText("导入失败：" + error)
+            QMessageBox.warning(self, "导入失败", error)
             return
+        restored = result.get("restored", [])
         self.status.setText("已恢复：" + "、".join(restored))
         parent = self.parent()
         if parent and hasattr(parent, "reload_after_restore"):
@@ -8193,6 +8960,19 @@ class BackupDialog(QDialog):
             os.startfile(str(BACKUP_DIR))
         except Exception as exc:
             QMessageBox.information(self, "备份文件夹", f"{BACKUP_DIR}\n{exc}")
+
+    def closeEvent(self, event):
+        active_workers = [
+            self.update_worker,
+            self.github_backup_worker,
+            self.backup_export_worker,
+            self.backup_restore_worker,
+        ]
+        if any(worker is not None and worker.isRunning() for worker in active_workers):
+            self.status.setText("任务正在运行，完成后再关闭这个窗口。")
+            event.ignore()
+            return
+        super().closeEvent(event)
 
 
 class DiagnosticWorker(QThread):
@@ -8343,6 +9123,44 @@ class DiagnosticsDialog(QDialog):
         except Exception as exc:
             QMessageBox.information(self, "运行日志", f"{RUNTIME_LOG}\n{exc}")
 
+    def closeEvent(self, event):
+        detach_running_worker(self.worker, ("result", "finished"))
+        self.worker = None
+        super().closeEvent(event)
+
+
+class BatteryReportWorker(QThread):
+    result = Signal(object)
+
+    def __init__(self, target):
+        super().__init__()
+        self.target = str(target)
+
+    def run(self):
+        target = Path(self.target)
+        try:
+            completed = subprocess.run(
+                ["powercfg", "/batteryreport", "/output", str(target)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=25,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as exc:
+            self.result.emit({"ok": False, "error": f"生成失败：{exc}", "target": str(target)})
+            return
+        if completed.returncode != 0 or not target.exists():
+            self.result.emit(
+                {
+                    "ok": False,
+                    "error": "Windows 没有生成电池报告；台式机或无电池设备可能不支持。",
+                    "target": str(target),
+                }
+            )
+            return
+        self.result.emit({"ok": True, "target": str(target)})
+
 
 class BatteryDialog(QDialog):
     def __init__(self, config, parent=None):
@@ -8377,6 +9195,8 @@ class BatteryDialog(QDialog):
         refresh = QPushButton("刷新")
         refresh.setObjectName("sendButton")
         report = QPushButton("生成电池报告")
+        self.report_btn = report
+        self.report_worker = None
         settings = QPushButton("电源设置")
         copy = QPushButton("复制状态")
         close = QPushButton("关闭")
@@ -8413,28 +9233,35 @@ class BatteryDialog(QDialog):
             QMessageBox.information(self, "电源设置", f"无法打开 Windows 电源设置：{exc}")
 
     def generate_report(self):
+        if self.report_worker and self.report_worker.isRunning():
+            return
         BACKUP_DIR.mkdir(exist_ok=True)
         target = BACKUP_DIR / f"battery-report-{datetime.now():%Y%m%d-%H%M%S}.html"
-        try:
-            completed = subprocess.run(
-                ["powercfg", "/batteryreport", "/output", str(target)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=25,
-                check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except Exception as exc:
-            QMessageBox.warning(self, "电池报告", f"生成失败：{exc}")
+        self.report_btn.setEnabled(False)
+        self.updated.setText("正在生成电池报告，窗口可继续响应...")
+        self.report_worker = BatteryReportWorker(target)
+        self.report_worker.result.connect(self.battery_report_finished)
+        self.report_worker.finished.connect(lambda: setattr(self, "report_worker", None))
+        self.report_worker.start()
+
+    def battery_report_finished(self, result):
+        self.report_btn.setEnabled(True)
+        if not result.get("ok"):
+            QMessageBox.information(self, "电池报告", result.get("error", "生成失败"))
             return
-        if completed.returncode != 0 or not target.exists():
-            QMessageBox.information(self, "电池报告", "Windows 没有生成电池报告；台式机或无电池设备可能不支持。")
-            return
+        target = result.get("target", "")
         try:
-            os.startfile(str(target))
+            os.startfile(target)
         except Exception:
             pass
         QMessageBox.information(self, "电池报告", f"报告已保存：\n{target}")
+
+    def closeEvent(self, event):
+        if self.report_worker and self.report_worker.isRunning():
+            self.updated.setText("电池报告正在生成，完成后再关闭这个窗口。")
+            event.ignore()
+            return
+        super().closeEvent(event)
 
 
 class PerformanceDialog(QDialog):
@@ -8478,6 +9305,10 @@ class PerformanceDialog(QDialog):
         large = QPushButton("查找大文件")
         processes = QPushButton("资源占用")
         desktop = QPushButton("扫描桌面整理")
+        self.scan_btn = scan
+        self.clean_btn = clean
+        self.large_btn = large
+        self.desktop_scan_btn = desktop
         scan.setObjectName("sendButton")
         clean.setObjectName("dangerButton")
         large.setObjectName("ghostButton")
@@ -8500,6 +9331,7 @@ class PerformanceDialog(QDialog):
         disk_cleanup = QPushButton("系统磁盘清理")
         taskmgr = QPushButton("任务管理器")
         close = QPushButton("关闭")
+        self.desktop_organize_btn = organize
         organize.setObjectName("sendButton")
         for button in (open_location, storage, startup, disk_cleanup, taskmgr, close):
             button.setObjectName("ghostButton")
@@ -8521,6 +9353,18 @@ class PerformanceDialog(QDialog):
         self.summary.setText(text)
         self.list.clear()
         self.list.addItem(text)
+        self.set_task_buttons_enabled(False)
+
+    def set_task_buttons_enabled(self, enabled):
+        for button in (
+            getattr(self, "scan_btn", None),
+            getattr(self, "clean_btn", None),
+            getattr(self, "large_btn", None),
+            getattr(self, "desktop_scan_btn", None),
+            getattr(self, "desktop_organize_btn", None),
+        ):
+            if button is not None:
+                button.setEnabled(bool(enabled))
 
     def scan_cleanup(self):
         if self.scan_worker and self.scan_worker.isRunning():
@@ -8532,6 +9376,7 @@ class PerformanceDialog(QDialog):
         self.scan_worker.start()
 
     def render_cleanup(self, items, error):
+        self.set_task_buttons_enabled(True)
         self.list.clear()
         if error:
             self.summary.setText(f"扫描失败：{error}")
@@ -8585,6 +9430,7 @@ class PerformanceDialog(QDialog):
         self.delete_worker.start()
 
     def finish_cleanup(self, deleted, freed, skipped, error):
+        self.set_task_buttons_enabled(True)
         if error:
             self.summary.setText(f"清理失败：{error}")
             return
@@ -8602,6 +9448,7 @@ class PerformanceDialog(QDialog):
         self.large_worker.start()
 
     def render_large_files(self, files, error):
+        self.set_task_buttons_enabled(True)
         self.list.clear()
         self.large_files = files
         if error:
@@ -8627,6 +9474,7 @@ class PerformanceDialog(QDialog):
         self.desktop_scan_worker.start()
 
     def render_desktop_plan(self, plan, skipped, error):
+        self.set_task_buttons_enabled(True)
         self.list.clear()
         self.desktop_plan = plan
         if error:
@@ -8685,6 +9533,7 @@ class PerformanceDialog(QDialog):
         self.desktop_move_worker.start()
 
     def finish_desktop_organize(self, moved, skipped, error):
+        self.set_task_buttons_enabled(True)
         if error:
             self.summary.setText(f"整理失败：{error}")
             return
@@ -8731,11 +9580,30 @@ class PerformanceDialog(QDialog):
         except Exception as exc:
             QMessageBox.information(self, "系统磁盘清理", str(exc))
 
+    def active_worker_labels(self):
+        workers = [
+            (self.scan_worker, "清理扫描"),
+            (self.delete_worker, "清理文件"),
+            (self.large_worker, "大文件扫描"),
+            (self.desktop_scan_worker, "桌面整理扫描"),
+            (self.desktop_move_worker, "桌面文件移动"),
+        ]
+        return [label for worker, label in workers if worker is not None and worker.isRunning()]
+
+    def closeEvent(self, event):
+        active = self.active_worker_labels()
+        if active:
+            self.summary.setText("正在运行：" + "、".join(active) + "。完成后再关闭这个窗口。")
+            event.ignore()
+            return
+        super().closeEvent(event)
+
 
 class FileSearchDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.worker = None
+        self.closing = False
         self.results = []
         self.roots = file_search_roots()
         self.setWindowTitle("糯米找文件")
@@ -8786,6 +9654,9 @@ class FileSearchDialog(QDialog):
         open_folder = QPushButton("打开位置")
         copy_path = QPushButton("复制路径")
         close = QPushButton("关闭")
+        self.search_btn = search
+        self.stop_btn = stop
+        self.stop_btn.setEnabled(False)
         search.setObjectName("sendButton")
         stop.setObjectName("dangerButton")
         for button in (open_file, open_folder, copy_path, close):
@@ -8817,15 +9688,18 @@ class FileSearchDialog(QDialog):
         self.list.clear()
         self.results = []
         self.status.setText("糯米正在翻文件夹……")
+        self.search_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
         self.worker = FileSearchWorker(query, roots, self.kind.currentText(), self.include_content.isChecked())
         self.worker.progress.connect(self.status.setText)
         self.worker.result.connect(self.render_results)
-        self.worker.finished.connect(lambda: setattr(self, "worker", None))
+        self.worker.finished.connect(self.search_worker_finished)
         self.worker.start()
 
     def stop(self):
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
+            self.stop_btn.setEnabled(False)
             self.status.setText("正在停止搜索……")
 
     def render_results(self, results, error, truncated):
@@ -8882,10 +9756,15 @@ class FileSearchDialog(QDialog):
         QApplication.clipboard().setText(result.get("path", ""))
         self.status.setText("路径已复制。")
 
+    def search_worker_finished(self):
+        self.worker = None
+        self.search_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+
     def closeEvent(self, event):
-        if self.worker and self.worker.isRunning():
-            self.worker.cancel()
-            self.worker.wait(1200)
+        self.closing = True
+        detach_running_worker(self.worker, ("progress", "result", "finished"), cancel=True)
+        self.worker = None
         super().closeEvent(event)
 
 
@@ -8897,8 +9776,14 @@ class PetSmartMenu(QDialog):
         self.setWindowFlags(Qt.Popup | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet(smart_menu_style(pet.config))
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(0)
+        self.scroll = None
+        content = QWidget()
+        content.setObjectName("smartMenuContent")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(10)
 
         title = QLabel(f"{pet.config.get('PetName', '糯米')}")
@@ -8910,20 +9795,26 @@ class PetSmartMenu(QDialog):
         layout.addWidget(hint)
 
         task_text = "\n".join(today_task_lines())
-        weather = getattr(pet, "weather_text", "上海 天气读取中")
+        weather = weather_card_text(getattr(pet, "weather_text", "上海 天气读取中"))
         metrics = QGridLayout()
         metrics.setHorizontalSpacing(8)
         metrics.setVerticalSpacing(8)
         cards = [
-            ("考研", exam_countdown_text(pet.config), pet.study_summary),
-            ("今日", today_dashboard_text(pet), pet.open_today_board),
-            ("任务", task_text, pet.open_todos),
-            ("日程", next_event_preview(), pet.open_calendar),
-            ("天气", weather, pet.open_weather),
-            ("邮件", mail_dashboard_text(), pet.open_mail),
+            ("考研", exam_countdown_text(pet.config), pet.study_summary, {}),
+            ("今日", today_dashboard_text(pet), pet.open_today_board, {}),
+            ("任务", task_text, pet.open_todos, {}),
+            ("日程", next_event_preview(), pet.open_calendar, {}),
+            ("天气", weather, pet.open_weather, {"max_lines": 3, "max_chars": 18, "reserve_lines": 4}),
+            ("邮件", mail_dashboard_text(), pet.open_mail, {}),
         ]
-        for index, (card_title, detail, fn) in enumerate(cards):
-            metrics.addWidget(self.make_card_button(card_title, detail, fn), index // 2, index % 2)
+        card_features = ["StudyFeatureEnabled", "TodayFeatureEnabled", "TodoFeatureEnabled", "CalendarFeatureEnabled", "WeatherFeatureEnabled", "MailFeatureEnabled"]
+        visible_index = 0
+        for index, (card_title, detail, fn, card_options) in enumerate(cards):
+            if not feature_enabled(pet.config, card_features[index]):
+                continue
+            index = visible_index
+            visible_index += 1
+            metrics.addWidget(self.make_card_button(card_title, detail, fn, **card_options), index // 2, index % 2)
         layout.addLayout(metrics)
 
         grid = QGridLayout()
@@ -8940,7 +9831,23 @@ class PetSmartMenu(QDialog):
             ("单词", "弹出词汇", pet.open_word_popup),
             ("公式", "数学速查", pet.open_formula_search),
         ]
+        primary_features = [
+            "ToolboxFeatureEnabled",
+            "ClaudeFeatureEnabled",
+            "AiFeatureEnabled",
+            "OcrFeatureEnabled",
+            "FileSearchFeatureEnabled",
+            "PerformanceFeatureEnabled",
+            "DesktopOrganizerFeatureEnabled",
+            "word_popup_enabled",
+            "FormulaFeatureEnabled",
+        ]
+        visible_index = 0
         for index, (label, hint_text, fn) in enumerate(primary):
+            if not feature_enabled(pet.config, primary_features[index]):
+                continue
+            index = visible_index
+            visible_index += 1
             grid.addWidget(self.make_button(label, hint_text, fn, "smartPrimary"), index // 3, index % 3)
         layout.addLayout(grid)
 
@@ -8951,6 +9858,7 @@ class PetSmartMenu(QDialog):
         tools = QGridLayout()
         tools.setHorizontalSpacing(8)
         tools.setVerticalSpacing(8)
+        bubble_action_label = "关气泡" if pet.config.get("BubbleEnabled", True) else "开气泡"
         tool_items = [
             ("翻译", pet.open_translate),
             ("剪贴板", pet.open_clipboard),
@@ -8958,10 +9866,26 @@ class PetSmartMenu(QDialog):
             ("诊断", pet.open_diagnostics),
             ("词库", pet.open_notebook),
             ("电池", pet.open_battery),
-            ("关气泡", pet.close_current_bubble),
+            (bubble_action_label, pet.toggle_bubble_enabled),
             ("单词开关", pet.toggle_word_popup),
         ]
+        tool_features = [
+            "TranslateFeatureEnabled",
+            "ClipboardHistoryEnabled",
+            "ActionLabFeatureEnabled",
+            "DiagnosticsFeatureEnabled",
+            "NotebookFeatureEnabled",
+            "BatteryFeatureEnabled",
+            None,
+            "word_popup_enabled",
+        ]
+        visible_index = 0
         for index, (label, fn) in enumerate(tool_items):
+            feature_key = tool_features[index]
+            if feature_key is not None and not feature_enabled(pet.config, feature_key):
+                continue
+            index = visible_index
+            visible_index += 1
             tools.addWidget(self.make_button(label, "", fn, "smartSecondary"), index // 4, index % 4)
         layout.addLayout(tools)
 
@@ -8969,6 +9893,7 @@ class PetSmartMenu(QDialog):
         small.setHorizontalSpacing(8)
         small.setVerticalSpacing(8)
         secondary = [
+            ("功能", pet.open_feature_switch),
             ("设置", pet.open_settings),
             ("说明", pet.open_help),
             ("收起", pet.hide_to_tray),
@@ -8976,27 +9901,77 @@ class PetSmartMenu(QDialog):
             ("退出", pet.exit_pet),
         ]
         for index, (label, fn) in enumerate(secondary):
-            small.addWidget(self.make_button(label, "", fn, "smartSmall"), 0, index)
+            small.addWidget(self.make_button(label, "", fn, "smartSmall"), index // 3, index % 3)
         layout.addLayout(small)
+
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
+        bounds = screen.availableGeometry() if screen else QRect(0, 0, 1280, 720)
+        max_height = max(260, bounds.height() - 28)
+        max_width = max(300, min(560, bounds.width() - 28))
+        content_hint = content.sizeHint()
+        preferred_width = min(max_width, max(420, content_hint.width() + 24))
+        natural_height = content_hint.height() + 18
+        preferred_height = min(max_height, max(360, natural_height))
+        if natural_height <= max_height:
+            outer.addWidget(content)
+        else:
+            self.scroll = QScrollArea()
+            self.scroll.setObjectName("smartMenuScroll")
+            self.scroll.setWidgetResizable(True)
+            self.scroll.setFrameShape(QFrame.NoFrame)
+            self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.scroll.setWidget(content)
+            self.scroll.verticalScrollBar().setSingleStep(max(48, text_font_sizes(self.pet.config)["menu"] * 4))
+            self.scroll.verticalScrollBar().setPageStep(max(160, preferred_height - 72))
+            outer.addWidget(self.scroll)
+            self.scroll.setMinimumHeight(max(220, preferred_height - 16))
+            self.scroll.setMaximumHeight(max(220, preferred_height - 16))
+        self.setFixedSize(preferred_width, preferred_height)
 
     def make_button(self, label, hint, fn, role):
         button = QPushButton(f"{label}\n{hint}" if hint else label)
         button.setObjectName(role)
-        button.setMinimumWidth(122)
-        button.setMinimumHeight(46 if role == "smartSmall" else 72)
+        if role == "smartPrimary":
+            button.setMinimumWidth(112)
+            button.setMinimumHeight(60)
+        elif role == "smartSecondary":
+            button.setMinimumWidth(104)
+            button.setMinimumHeight(44)
+        else:
+            button.setMinimumWidth(104)
+            button.setMinimumHeight(40)
         button.clicked.connect(lambda: self.run(fn))
         return button
 
-    def make_card_button(self, title, detail, fn):
-        detail_text = str(detail or "").strip()
-        detail_text = "\n".join(line.strip() for line in detail_text.splitlines() if line.strip())
-        if len(detail_text) > 70:
-            detail_text = detail_text[:69] + "…"
-        button = QPushButton(f"{title}\n{detail_text}" if detail_text else title)
+    def make_card_button(self, title, detail, fn, max_lines=2, max_chars=22, reserve_lines=0):
+        full_detail = str(detail or "").strip()
+        detail_text = compact_card_detail(full_detail, max_lines=max_lines, max_chars=max_chars)
+        button = QPushButton()
         button.setObjectName("smartMetricButton")
-        button.setMinimumWidth(152)
-        button.setMinimumHeight(76)
-        button.setMaximumHeight(76)
+        if full_detail:
+            button.setToolTip(full_detail)
+        inner = QVBoxLayout(button)
+        inner.setContentsMargins(10, 8, 10, 8)
+        inner.setSpacing(3)
+        title_label = QLabel(title)
+        title_label.setObjectName("smartMetricTitle")
+        title_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        detail_label = QLabel(detail_text)
+        detail_label.setObjectName("smartMetricDetail")
+        detail_label.setWordWrap(True)
+        detail_label.setTextFormat(Qt.PlainText)
+        detail_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        detail_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        inner.addWidget(title_label)
+        if detail_text:
+            inner.addWidget(detail_label)
+        inner.addStretch(1)
+        button.setMinimumWidth(156)
+        line_count = 1 + max(1, len(detail_text.splitlines()) if detail_text else 0)
+        line_count = max(line_count, int(reserve_lines or 0))
+        line_height = max(16, int(text_font_sizes(self.pet.config)["menu"] * 1.38))
+        button.setMinimumHeight(max(88, line_height * line_count + 34))
+        button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         button.clicked.connect(lambda: self.run(fn))
         return button
 
@@ -9009,7 +9984,14 @@ class PetSmartMenu(QDialog):
 
     def run(self, fn):
         self.accept()
-        QTimer.singleShot(0, fn)
+        def invoke():
+            try:
+                fn()
+            except Exception as exc:
+                append_runtime_log(f"smart menu action failed: {type(exc).__name__}: {exc}")
+                QMessageBox.warning(self.pet, "功能打开失败", f"这个功能刚才没有正常打开：\n{exc}")
+
+        QTimer.singleShot(0, invoke)
 
 
 class WordPopupDialog(QDialog):
@@ -9624,6 +10606,7 @@ class SettingsDialog(QDialog):
         self.load_voice_btn = QPushButton("加载 Windows 离线声音")
         self.load_voice_btn.setObjectName("ghostButton")
         self.load_voice_btn.clicked.connect(self.load_voice_options)
+        self.voice_list_worker = None
         self.voice_rate = QSpinBox()
         self.voice_rate.setRange(-5, 5)
         self.voice_rate.setValue(int(config.get("VoiceRate", -1)))
@@ -9700,9 +10683,16 @@ class SettingsDialog(QDialog):
         backup_btn = QPushButton("备份 / 迁移糯米数据")
         backup_btn.setObjectName("ghostButton")
         backup_btn.clicked.connect(self.open_backup)
+        self.backup_btn = backup_btn
+        feature_switch_btn = QPushButton("功能开关")
+        feature_switch_btn.setObjectName("sendButton")
+        feature_switch_btn.clicked.connect(self.open_feature_switch)
         diagnostics_btn = QPushButton("诊断中心 / 修复启动")
         diagnostics_btn.setObjectName("ghostButton")
         diagnostics_btn.clicked.connect(self.open_diagnostics)
+        self.diagnostics_btn = diagnostics_btn
+        backup_btn.setVisible(feature_enabled(config, "BackupFeatureEnabled"))
+        diagnostics_btn.setVisible(feature_enabled(config, "DiagnosticsFeatureEnabled"))
 
         tabs = QTabWidget()
         tabs.setObjectName("settingsTabs")
@@ -9812,6 +10802,7 @@ class SettingsDialog(QDialog):
         advanced_form.addRow("低电量提醒阈值", self.battery_low)
         advanced_form.addRow("充满提示阈值", self.battery_full)
         advanced_form.addRow("同类提醒冷却", self.health_cooldown)
+        advanced_form.addRow(feature_switch_btn)
         advanced_form.addRow(diagnostics_btn)
         advanced_form.addRow(backup_btn)
         advanced_form.addRow(QLabel("VPN、Codex、自启动等由桌宠自动检测和维护。"))
@@ -10012,13 +11003,47 @@ class SettingsDialog(QDialog):
         self.restore_font_preview()
         super().reject()
 
+    def closeEvent(self, event):
+        for worker in (getattr(self, "voice_list_worker", None), getattr(self, "preview_tts_worker", None)):
+            detach_running_worker(worker, ("result", "finished") if isinstance(worker, TtsVoiceListWorker) else ("finished",))
+        self.voice_list_worker = None
+        self.preview_tts_worker = None
+        super().closeEvent(event)
+
     def load_voice_options(self):
+        if self.voice_list_worker and self.voice_list_worker.isRunning():
+            return
         current_voice = self.selected_voice_name()
+        self.load_voice_btn.setEnabled(False)
+        self.load_voice_btn.setText("正在加载声音...")
+        self.voice_list_worker = TtsVoiceListWorker()
+        self.voice_list_worker.result.connect(lambda result, current=current_voice: self.voice_options_loaded_result(result, current))
+        self.voice_list_worker.finished.connect(lambda: setattr(self, "voice_list_worker", None))
+        self.voice_list_worker.start()
+
+    def voice_options_loaded_result(self, result, current_voice=""):
         self.voice_name.blockSignals(True)
         self.voice_name.clear()
-        auto_voice = preferred_tts_voice_name(self.config)
+        voices = result.get("voices", [])
+        auto_voice = str(self.config.get("VoiceName", "")).strip()
+        if not auto_voice:
+            sweet_hints = ("xiaoxiao", "huihui", "yaoyao", "xiaoyi", "hanhan", "tingting")
+            for hint in sweet_hints:
+                auto_voice = next((voice["name"] for voice in voices if hint in voice.get("name", "").lower()), "")
+                if auto_voice:
+                    break
+        if not auto_voice:
+            auto_voice = next(
+                (
+                    voice["name"]
+                    for voice in voices
+                    if voice.get("culture", "").lower().startswith("zh")
+                    and voice.get("gender", "").lower() == "female"
+                ),
+                "",
+            )
         self.voice_name.addItem(f"自动甜美女声（{auto_voice or '系统默认'}）", "")
-        for voice in installed_tts_voices():
+        for voice in voices:
             label = f"{voice['name']}（{voice.get('culture') or '未知'}，{voice.get('gender') or '未知'}）"
             self.voice_name.addItem(label, voice["name"])
         if current_voice:
@@ -10028,7 +11053,11 @@ class SettingsDialog(QDialog):
                 index = self.voice_name.findData(current_voice)
             self.voice_name.setCurrentIndex(max(0, index))
         self.voice_name.blockSignals(False)
-        self.voice_options_loaded = True
+        self.voice_options_loaded = bool(result.get("ok"))
+        self.load_voice_btn.setEnabled(True)
+        self.load_voice_btn.setText("重新加载 Windows 离线声音" if self.voice_options_loaded else "加载 Windows 离线声音")
+        if not result.get("ok"):
+            QMessageBox.information(self, "Windows 离线声音", result.get("error", "没有读取到可用声音。"))
 
     def selected_voice_name(self):
         data = self.voice_name.currentData()
@@ -10063,6 +11092,7 @@ class SettingsDialog(QDialog):
             "你好呀，我是糯米。这个声音听起来是不是自然多了？以后我就这样陪你聊天。",
             config,
         )
+        self.preview_tts_worker.finished.connect(lambda: setattr(self, "preview_tts_worker", None))
         self.preview_tts_worker.start()
 
     def pick_pet(self):
@@ -10108,9 +11138,40 @@ class SettingsDialog(QDialog):
             self.mail_keywords.setText(DEFAULT_CONFIG["MailKeywords"])
 
     def open_backup(self):
+        if not feature_enabled(self.config, "BackupFeatureEnabled"):
+            QMessageBox.information(self, "功能已关闭", "备份 / 迁移已在功能开关里关闭。")
+            return
         BackupDialog(self.parent() or self).exec()
 
+    def open_feature_switch(self):
+        target = self.parent() if self.parent() is not None and hasattr(self.parent(), "apply_feature_switch_changes") else self
+        if FeatureSwitchDialog(self.config, target).exec():
+            self.refresh_feature_controls()
+
+    def refresh_feature_controls(self):
+        pairs = [
+            (self.voice_enabled, "VoiceEnabled"),
+            (self.chat_voice_replies, "ChatVoiceReplies"),
+            (self.clipboard_enabled, "ClipboardHistoryEnabled"),
+            (self.auto_quiet_fullscreen, "AutoQuietFullscreen"),
+            (self.auto_hide_fullscreen, "AutoHideFullscreen"),
+            (self.auto_hide_games, "AutoHideGames"),
+            (self.auto_start, "AutoStart"),
+            (self.watchdog_enabled, "WatchdogEnabled"),
+            (self.health_watch_enabled, "SystemHealthWatchEnabled"),
+            (self.battery_alerts_enabled, "BatteryAlertsEnabled"),
+        ]
+        for check, key in pairs:
+            check.setChecked(feature_enabled(self.config, key))
+        if hasattr(self, "backup_btn"):
+            self.backup_btn.setVisible(feature_enabled(self.config, "BackupFeatureEnabled"))
+        if hasattr(self, "diagnostics_btn"):
+            self.diagnostics_btn.setVisible(feature_enabled(self.config, "DiagnosticsFeatureEnabled"))
+
     def open_diagnostics(self):
+        if not feature_enabled(self.config, "DiagnosticsFeatureEnabled"):
+            QMessageBox.information(self, "功能已关闭", "诊断中心已在功能开关里关闭。")
+            return
         DiagnosticsDialog(self.config, self.parent() or self).exec()
 
     def save(self):
@@ -10196,17 +11257,16 @@ class PetWindow(QWidget):
         super().__init__()
         self.config = load_config()
         set_active_text_config(self.config)
-        configured_tesseract_path(self.config, persist=True)
-        sync_startup_entry(self.config)
-        sync_watchdog(self.config)
         self.drag_pos = QPoint()
         self.dragging = False
         self.state = "待机"
         self.mail_worker = None
         self.tts_worker = None
+        self.ocr_worker = None
         self.pending_reminder_speech = ""
         self.last_ambient_voice_at = 0.0
         self.weather_worker = None
+        self.startup_worker = None
         self.clipboard_last_text = ""
         self.clipboard_ignore_once = ""
         self.weather_text = f"{self.config.get('WeatherCity', '上海')} 天气读取中"
@@ -10256,6 +11316,7 @@ class PetWindow(QWidget):
         self.pose_frames = []
         self.pose_index = 0
         self.pose_base_pos = QPoint()
+        self.position_save_anchor = None
         self.pose_keep_position = False
         self.pose_default_interval = 90
         self.pose_end_action = ""
@@ -10267,10 +11328,12 @@ class PetWindow(QWidget):
         self.monitor.start(15_000)
         self.weather_timer = QTimer(self)
         self.weather_timer.timeout.connect(self.refresh_weather)
-        self.weather_timer.start(30 * 60 * 1000)
+        if feature_enabled(self.config, "WeatherFeatureEnabled"):
+            self.weather_timer.start(30 * 60 * 1000)
         self.mail_timer = QTimer(self)
         self.mail_timer.timeout.connect(self.check_mail)
-        self.mail_timer.start(5 * 60 * 1000)
+        if feature_enabled(self.config, "MailFeatureEnabled"):
+            self.mail_timer.start(5 * 60 * 1000)
         self.health_bad_counts = {}
         saved_health_alerts = load_pet_memory().get("health_last_alert", {})
         self.health_last_alert = (
@@ -10334,17 +11397,20 @@ class PetWindow(QWidget):
         self.tray_notice_shown = False
         self.tray = None
         self.word_dialog = None
+        self.toolbox_worker = None
         self.setup_tray()
         self.bubble.say(f"{self.config.get('PetName')} 已上线。")
         QApplication.clipboard().dataChanged.connect(self.capture_clipboard)
         self.update_status()
         self.refresh_growth_state(show_new=False)
-        self.refresh_weather(show_bubble=False)
+        if feature_enabled(self.config, "WeatherFeatureEnabled"):
+            self.refresh_weather(show_bubble=False)
         QTimer.singleShot(1800, self.daily_memory_greeting)
         QTimer.singleShot(2600, self.check_exam_event)
         QTimer.singleShot(4200, self.check_seasonal_event)
         QTimer.singleShot(3500, self.check_holiday_reminder)
-        QTimer.singleShot(8000, self.check_mail)
+        if feature_enabled(self.config, "MailFeatureEnabled"):
+            QTimer.singleShot(8000, self.check_mail)
         QTimer.singleShot(12000, self.check_due_reminders)
         QTimer.singleShot(15000, self.check_system_health)
         self.schedule_random_action()
@@ -10355,12 +11421,46 @@ class PetWindow(QWidget):
         # Word popup timer - shows random Redbook word every 4-8 minutes
         self._word_timer = QTimer(self)
         self._word_timer.timeout.connect(self._show_word_popup)
-        self._word_timer.start(random.randint(240000, 480000))
+        if feature_enabled(self.config, "word_popup_enabled") and self.config.get("BubbleEnabled", True):
+            self._word_timer.start(random.randint(240000, 480000))
+        QTimer.singleShot(5000, self.run_startup_maintenance)
+
+    def run_startup_maintenance(self):
+        if self.startup_worker and self.startup_worker.isRunning():
+            return
+        self.startup_worker = StartupMaintenanceWorker(self.config)
+        self.startup_worker.result.connect(append_runtime_log)
+        self.startup_worker.finished.connect(lambda: setattr(self, "startup_worker", None))
+        self.startup_worker.start()
+
+    def foreground_fullscreen_active(self):
+        exclude_hwnds = {int(self.winId())}
+        if hasattr(self, "bubble"):
+            exclude_hwnds.add(int(self.bubble.winId()))
+        return foreground_window_fullscreen(exclude_hwnds=exclude_hwnds, exclude_pids={os.getpid()})
+
+    def fullscreen_should_hide_bubble(self):
+        return bool(self.config.get("AutoQuietFullscreen", True) and self.foreground_fullscreen_active())
+
+    def should_suppress_bubble(self):
+        if not self.config.get("BubbleEnabled", True):
+            return True
+        if getattr(self, "auto_hidden_by_context", False):
+            return True
+        if self.fullscreen_should_hide_bubble():
+            return True
+        return False
+
+    def hide_bubble_now(self):
+        self.bubble.set_click_callback(None)
+        self.bubble.hide()
+        if self.word_dialog is not None:
+            self.word_dialog.hide()
 
     def is_quiet(self):
         if self.config.get("QuietMode", False):
             return True
-        if self.config.get("AutoQuietFullscreen", True) and foreground_window_fullscreen(exclude_hwnds={int(self.winId())}, exclude_pids={os.getpid()}):
+        if self.fullscreen_should_hide_bubble():
             return True
         return False
 
@@ -10393,7 +11493,7 @@ class PetWindow(QWidget):
                 self.save_window_position()
                 self.auto_hidden_by_context = True
                 self.auto_hide_reason = reason
-                self.bubble.hide()
+                self.hide_bubble_now()
                 self.hide()
                 append_runtime_log(f"auto hidden by {reason}")
             elif self.auto_hidden_by_context:
@@ -10403,6 +11503,8 @@ class PetWindow(QWidget):
             self.auto_hidden_by_context = False
             self.auto_hide_reason = ""
             self.restore_from_tray(say=False, activate=False)
+        if self.fullscreen_should_hide_bubble():
+            self.hide_bubble_now()
 
     def daily_memory_greeting(self):
         if self.is_quiet():
@@ -10717,6 +11819,7 @@ class PetWindow(QWidget):
         self.pose_frames = frames
         self.pose_index = 0
         self.pose_base_pos = self.pos()
+        self.position_save_anchor = QPoint(self.pose_base_pos) if self.config.get("LockPetPosition", True) else None
         self.pose_keep_position = keep_position
         self.pose_end_action = end_action or ""
         self.pose_default_interval = max(45, int(interval))
@@ -11133,6 +12236,7 @@ class PetWindow(QWidget):
     def short_walk_direction(self, direction):
         self.state = "散步"
         self.update_status()
+        keep_final_position = not self.config.get("LockPetPosition", True)
         step = random.randint(34, 62)
         action = "walk_right" if direction > 0 else "walk_left"
         interval = random.randint(135, 225)
@@ -11152,7 +12256,7 @@ class PetWindow(QWidget):
             offsets=offsets,
             durations=durations,
             interval=interval,
-            keep_position=True,
+            keep_position=keep_final_position,
         ):
             return
         self.play_pose_sequence(
@@ -11164,7 +12268,7 @@ class PetWindow(QWidget):
                 (1.0, 1.0, 0, direction * step, 0),
             ],
             interval=random.randint(90, 145),
-            keep_position=True,
+            keep_position=keep_final_position,
         )
 
     def study_nudge(self):
@@ -11217,6 +12321,7 @@ class PetWindow(QWidget):
         self.anim.stop()
         self.pose_timer.stop()
         self.sprite.show_idle()
+        self.position_save_anchor = None
         self.dragging = True
         self.drag_pos = global_pos - self.frameGeometry().topLeft()
         self.state = "拖动"
@@ -11239,6 +12344,7 @@ class PetWindow(QWidget):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.anim.stop()
+            self.position_save_anchor = None
             self.dragging = True
             self.drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             self.state = "拖动"
@@ -11375,6 +12481,8 @@ class PetWindow(QWidget):
 
 
     def open_notebook(self):
+        if not self.require_feature("NotebookFeatureEnabled"):
+            return
         dlg = QDialog(self)
         dlg.setWindowTitle("笔记本")
         dlg.resize(500, 440)
@@ -11485,6 +12593,8 @@ class PetWindow(QWidget):
         dlg.exec()
 
     def open_formula_search(self):
+        if not self.require_feature("FormulaFeatureEnabled"):
+            return
         dlg = QDialog(self)
         dlg.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)
         dlg.setWindowTitle("考研数学公式速查")
@@ -11561,10 +12671,12 @@ class PetWindow(QWidget):
 
 
     def open_word_popup(self):
+        if not self.require_feature("word_popup_enabled"):
+            return
         self.show_word_popup(force=True)
 
     def show_word_popup(self, force=False):
-        if not force and not self.config.get("word_popup_enabled", True):
+        if not feature_enabled(self.config, "word_popup_enabled") or self.should_suppress_bubble():
             return
         if self.word_dialog is not None:
             self.word_dialog.hide()
@@ -11585,11 +12697,21 @@ class PetWindow(QWidget):
                 self.bubble.set_click_callback(None)
                 self.bubble.say("考研词汇库没有可用单词。")
                 return
-            count = min(random.randint(5, 7), len(words))
-            picked = random.sample(words, count)
+            candidates = random.sample(words, min(len(words), 10))
+            picked = []
+            total_chars = len("考研英语词汇  单击换一批\n")
+            for item in candidates:
+                line = f"{item['word']}  {item['meaning']}"
+                projected = total_chars + len(line) + 1
+                if picked and (len(picked) >= 5 or (len(picked) >= 3 and projected > 230)):
+                    break
+                picked.append(item)
+                total_chars = projected
+            if not picked:
+                picked = candidates[:1]
             word_lines = [f"{item['word']}  {item['meaning']}" for item in picked]
             text = "考研英语词汇  单击换一批\n" + "\n".join(word_lines)
-            self.bubble.say(text, ms=30000, fixed_size=(370, 220))
+            self.bubble.say(text, ms=30000, fixed_size=(440, 0), avoid_pet_center_tail=True)
             self.bubble.set_click_callback(lambda: self.show_word_popup(force=True))
             self.bubble.setCursor(Qt.PointingHandCursor)
         if hasattr(self, "_word_timer") and self._word_timer:
@@ -11606,7 +12728,8 @@ class PetWindow(QWidget):
         status = "已开启" if enabled else "已关闭"
         self.bubble.say(f"单词弹窗 {status}")
         if enabled:
-            self._word_timer.start(30000)
+            if self.config.get("BubbleEnabled", True):
+                self._word_timer.start(30000)
         else:
             if self.word_dialog is not None:
                 self.word_dialog.hide()
@@ -11615,9 +12738,7 @@ class PetWindow(QWidget):
 
 
     def restart_pet(self):
-        self.config["WindowLeft"] = self.x()
-        self.config["WindowTop"] = self.y()
-        save_json(CONFIG, self.config)
+        self.save_window_position()
         self.force_quit = True
         self.bubble.hide()
         if self.tray:
@@ -11635,64 +12756,187 @@ class PetWindow(QWidget):
         QApplication.quit()
 
     def closeEvent(self, event):
-        self.config["WindowLeft"] = self.x()
-        self.config["WindowTop"] = self.y()
-        save_json(CONFIG, self.config)
+        self.save_window_position()
+        if self.startup_worker and self.startup_worker.isRunning():
+            self.startup_worker.wait(1200)
         self.bubble.hide()
         write_shutdown_flag()
         super().closeEvent(event)
 
     def open_menu(self):
-        menu = PetSmartMenu(self)
-        menu.adjustSize()
-        cursor = QCursor.pos()
-        screen = QApplication.screenAt(cursor) or QApplication.primaryScreen()
-        bounds = screen.availableGeometry()
-        x = min(max(cursor.x() + 12, bounds.left()), bounds.right() - menu.width())
-        y = min(max(cursor.y() + 12, bounds.top()), bounds.bottom() - menu.height())
-        menu.move(x, y)
-        menu.exec()
+        try:
+            menu = PetSmartMenu(self)
+            menu.adjustSize()
+            cursor = QCursor.pos()
+            screen = QApplication.screenAt(cursor) or QApplication.primaryScreen()
+            bounds = screen.availableGeometry() if screen else QRect(0, 0, 1280, 720)
+            max_width = max(260, bounds.width() - 24)
+            max_height = max(260, bounds.height() - 24)
+            if menu.width() > max_width or menu.height() > max_height:
+                menu.resize(min(menu.width(), max_width), min(menu.height(), max_height))
+            max_x = max(bounds.left(), bounds.right() - menu.width() + 1)
+            max_y = max(bounds.top(), bounds.bottom() - menu.height() + 1)
+            x = min(max(cursor.x() + 12, bounds.left()), max_x)
+            y = min(max(cursor.y() + 12, bounds.top()), max_y)
+            menu.move(x, y)
+            self._smart_menu = menu
+            QTimer.singleShot(0, lambda m=menu: (m.raise_(), m.activateWindow()))
+            menu.exec()
+            self._smart_menu = None
+        except Exception as exc:
+            append_runtime_log(f"smart menu failed: {type(exc).__name__}: {exc}")
+            self.open_fallback_menu()
+
+    def open_fallback_menu(self):
+        menu = QMenu(self)
+        bubble_label = "关气泡" if self.config.get("BubbleEnabled", True) else "开气泡"
+        actions = [
+            ("功能开关", self.open_feature_switch),
+            (bubble_label, self.toggle_bubble_enabled),
+            ("单词开关", self.toggle_word_popup),
+            ("设置", self.open_settings),
+            ("重启", self.restart_pet),
+            ("退出", self.exit_pet),
+        ]
+        for label, fn in actions:
+            action = QAction(label, menu)
+            action.triggered.connect(lambda _checked=False, callback=fn: callback())
+            menu.addAction(action)
+        menu.exec(QCursor.pos())
+
+    def set_bubble_enabled(self, enabled, announce=True):
+        enabled = bool(enabled)
+        self.config["BubbleEnabled"] = enabled
+        save_json(CONFIG, self.config)
+        if enabled:
+            if feature_enabled(self.config, "word_popup_enabled") and hasattr(self, "_word_timer") and self._word_timer:
+                if not self._word_timer.isActive():
+                    self._word_timer.start(30000)
+            if announce:
+                self.bubble.say("气泡已开启。")
+            return
+        if hasattr(self, "_word_timer") and self._word_timer:
+            self._word_timer.stop()
+        self.hide_bubble_now()
+
+    def toggle_bubble_enabled(self):
+        self.set_bubble_enabled(not self.config.get("BubbleEnabled", True))
 
     def close_current_bubble(self):
-        self.bubble.set_click_callback(None)
-        self.bubble.hide()
-        if self.word_dialog is not None:
-            self.word_dialog.hide()
+        self.set_bubble_enabled(False, announce=False)
+
+    def feature_disabled_notice(self, key):
+        self.bubble.say(f"{feature_label(key)} 已在功能开关里关闭。")
+
+    def require_feature(self, key):
+        if feature_enabled(self.config, key):
+            return True
+        self.feature_disabled_notice(key)
+        return False
+
+    def apply_feature_switch_changes(self):
+        sync_startup_entry(self.config)
+        sync_watchdog(self.config)
+        self.sync_health_timer()
+        if hasattr(self, "weather_timer"):
+            if feature_enabled(self.config, "WeatherFeatureEnabled"):
+                if not self.weather_timer.isActive():
+                    self.weather_timer.start(30 * 60 * 1000)
+            else:
+                self.weather_timer.stop()
+        if hasattr(self, "mail_timer"):
+            if feature_enabled(self.config, "MailFeatureEnabled"):
+                if not self.mail_timer.isActive():
+                    self.mail_timer.start(5 * 60 * 1000)
+            else:
+                self.mail_timer.stop()
+        if hasattr(self, "_word_timer") and self._word_timer:
+            if feature_enabled(self.config, "word_popup_enabled") and self.config.get("BubbleEnabled", True):
+                if not self._word_timer.isActive():
+                    self._word_timer.start(30000)
+            else:
+                self._word_timer.stop()
+                self.bubble.set_click_callback(None)
+                if self.word_dialog is not None:
+                    self.word_dialog.hide()
+        if not self.config.get("BubbleEnabled", True):
+            self.hide_bubble_now()
+        if (
+            getattr(self, "auto_hidden_by_context", False)
+            and not feature_enabled(self.config, "AutoHideFullscreen")
+            and not feature_enabled(self.config, "AutoHideGames")
+        ):
+            self.restore_from_tray(say=False, activate=False)
+        self.update_status()
+
+    def open_feature_switch(self):
+        FeatureSwitchDialog(self.config, self).exec()
 
     def open_ai(self):
+        if not self.require_feature("AiFeatureEnabled"):
+            return
         AiDialog(self.config, self).exec()
 
     def open_today_board(self):
+        if not self.require_feature("TodayFeatureEnabled"):
+            return
         TodayBoardDialog(self).exec()
 
     def open_translate(self):
+        if not self.require_feature("TranslateFeatureEnabled"):
+            return
         TranslateDialog(self.config, self).exec()
 
     def open_clipboard(self):
+        if not self.require_feature("ClipboardHistoryEnabled"):
+            return
         ClipboardDialog(self).exec()
 
     def open_action_lab(self):
+        if not self.require_feature("ActionLabFeatureEnabled"):
+            return
         ActionLabDialog(self).exec()
 
     def open_diagnostics(self):
+        if not self.require_feature("DiagnosticsFeatureEnabled"):
+            return
         DiagnosticsDialog(self.config, self).exec()
 
     def open_performance(self):
+        if not self.require_feature("PerformanceFeatureEnabled"):
+            return
         PerformanceDialog(self).exec()
 
     def open_battery(self):
+        if not self.require_feature("BatteryFeatureEnabled"):
+            return
         BatteryDialog(self.config, self).exec()
 
     def open_desktop_organizer(self):
+        if not self.require_feature("DesktopOrganizerFeatureEnabled"):
+            return
         dlg = PerformanceDialog(self)
         dlg.scan_desktop_organize()
         dlg.exec()
 
     def open_file_search(self):
+        if not self.require_feature("FileSearchFeatureEnabled"):
+            return
         FileSearchDialog(self).exec()
 
     def open_core_toolbox(self):
-        ok, message = ensure_assistant_toolbox_server()
+        if not self.require_feature("ToolboxFeatureEnabled"):
+            return
+        if self.toolbox_worker and self.toolbox_worker.isRunning():
+            self.bubble.say("核心工具箱正在打开，稍等一下。")
+            return
+        self.bubble.say("正在打开核心工具箱。")
+        self.toolbox_worker = AssistantToolboxWorker(self)
+        self.toolbox_worker.result.connect(self.finish_open_core_toolbox)
+        self.toolbox_worker.finished.connect(lambda: setattr(self, "toolbox_worker", None))
+        self.toolbox_worker.start()
+
+    def finish_open_core_toolbox(self, ok, message):
         if not ok:
             QMessageBox.information(self, "核心工具箱", message)
             return
@@ -11700,22 +12944,30 @@ class PetWindow(QWidget):
         self.bubble.say(message + "，已打开核心工具箱。")
 
     def open_claude_code(self):
+        if not self.require_feature("ClaudeFeatureEnabled"):
+            return
         ClaudeCodeLauncherDialog(self.config, self).exec()
 
     def open_calendar(self):
+        if not self.require_feature("CalendarFeatureEnabled"):
+            return
         CalendarDialog(self).exec()
 
     def open_mail(self):
+        if not self.require_feature("MailFeatureEnabled"):
+            return
         MailDialog(self.config, self).exec()
 
     def open_weather(self):
-        self.refresh_weather(show_bubble=True)
+        if not self.require_feature("WeatherFeatureEnabled"):
+            return
+        WeatherDialog(self.config, self).exec()
 
     def open_help(self):
         HelpDialog(self).exec()
 
     def capture_clipboard(self):
-        if not self.config.get("ClipboardHistoryEnabled", True):
+        if not feature_enabled(self.config, "ClipboardHistoryEnabled"):
             return
         text = QApplication.clipboard().text()
         normalized = normalize_clipboard_text(text)
@@ -11758,7 +13010,9 @@ class PetWindow(QWidget):
         width = max(self.bubble.width(), 1)
         height = max(self.bubble.height(), 1)
         target_rect = self.pet_visual_rect()
-        target_x = target_rect.center().x()
+        avoid_center_tail = bool(getattr(self.bubble, "avoid_pet_center_tail", False))
+        side_hint = -1 if offset_x < 0 else 1
+        target_x = pet_bubble_anchor_x(target_rect, avoid_center_tail, side_hint)
         desired_x = target_x - width // 2 + offset_x
         desired_y = target_rect.top() + offset_y - height
         x = desired_x
@@ -11827,9 +13081,15 @@ class PetWindow(QWidget):
         update_saved_bubble_offset(self.config, offset_x, offset_y)
 
     def save_window_position(self):
-        safe = self.clamped_pos(self.pos())
+        pos = self.pos()
+        anchor = getattr(self, "position_save_anchor", None)
+        if self.config.get("LockPetPosition", True) and isinstance(anchor, QPoint) and not self.dragging:
+            pos = anchor
+        safe = self.clamped_pos(pos)
         if safe != self.pos():
             self.move(safe)
+        if self.config.get("LockPetPosition", True) and isinstance(anchor, QPoint) and not self.dragging:
+            self.position_save_anchor = QPoint(safe)
         self.config["WindowLeft"] = safe.x()
         self.config["WindowTop"] = safe.y()
         save_json(CONFIG, self.config)
@@ -11875,6 +13135,8 @@ class PetWindow(QWidget):
         self.update_status()
 
     def open_todos(self):
+        if not self.require_feature("TodoFeatureEnabled"):
+            return
         TodoDialog(self).exec()
 
     def try_add_natural_reminder(self, text):
@@ -11889,9 +13151,13 @@ class PetWindow(QWidget):
         return note
 
     def study_summary(self):
+        if not self.require_feature("StudyFeatureEnabled"):
+            return
         StudyDialog(self.config, self).exec()
 
     def start_focus_session(self):
+        if not self.require_feature("StudyFeatureEnabled"):
+            return
         if self.focus_active:
             self.bubble.say(self.focus_status_text())
             self.dog_reading()
@@ -11973,6 +13239,8 @@ class PetWindow(QWidget):
         )
 
     def refresh_weather(self, show_bubble=False):
+        if not feature_enabled(self.config, "WeatherFeatureEnabled"):
+            return
         if self.weather_worker and self.weather_worker.isRunning():
             return
         city = self.config.get("WeatherCity", "上海") or "上海"
@@ -11986,7 +13254,7 @@ class PetWindow(QWidget):
         self.weather_text = text
         self.update_status()
         if show_bubble:
-            self.bubble.say(text)
+            self.bubble.say(weather_card_text(text))
         self.check_weather_mood(text)
 
     def sync_health_timer(self):
@@ -12107,8 +13375,10 @@ class PetWindow(QWidget):
         self.react("提醒", f"节假日提醒：{next_holiday_text()}")
 
     def check_due_reminders(self):
-        self.check_calendar_reminders()
-        self.check_todo_reminders()
+        if feature_enabled(self.config, "CalendarFeatureEnabled"):
+            self.check_calendar_reminders()
+        if feature_enabled(self.config, "TodoFeatureEnabled"):
+            self.check_todo_reminders()
 
     def check_calendar_reminders(self):
         events = load_json(CALENDAR, [])
@@ -12154,6 +13424,8 @@ class PetWindow(QWidget):
         self.notify_due_reminder("提醒事项", "\n".join(lines), QSystemTrayIcon.Warning)
 
     def check_mail(self):
+        if not feature_enabled(self.config, "MailFeatureEnabled"):
+            return
         if self.mail_worker and self.mail_worker.isRunning():
             return
         self.mail_worker = MailWorker(self.config)
@@ -12169,6 +13441,11 @@ class PetWindow(QWidget):
         self.speak(text.splitlines()[0] if text else "", kind="ambient")
 
     def ocr_screenshot(self):
+        if not self.require_feature("OcrFeatureEnabled"):
+            return
+        if self.ocr_worker and self.ocr_worker.isRunning():
+            self.bubble.say("OCR 正在识别上一张截图，稍等一下。")
+            return
         self.bubble.hide()
         self.hide()
         QApplication.processEvents()
@@ -12189,8 +13466,17 @@ class PetWindow(QWidget):
         self.show()
         path = SCREENSHOTS / f"screenshot-{datetime.now():%Y%m%d-%H%M%S}.png"
         shot.save(str(path))
-        content, error = run_tesseract_ocr(self.config, path)
-        if error and "还没有配置 Tesseract" in error:
+        self.bubble.say("截图已保存，正在 OCR 识别。")
+        self.ocr_worker = OcrWorker(self.config, path)
+        self.ocr_worker.result.connect(self.ocr_screenshot_finished)
+        self.ocr_worker.finished.connect(lambda: setattr(self, "ocr_worker", None))
+        self.ocr_worker.start()
+
+    def ocr_screenshot_finished(self, result):
+        path = result.get("path", "")
+        content = result.get("content", "")
+        error = result.get("error", "")
+        if error and "Tesseract" in error and ("没有配置" in error or "路径" in error):
             self.bubble.say(error)
             return
         dlg = AiDialog(self.config, self)
@@ -12261,6 +13547,7 @@ def main():
         request_existing_instance_restore()
         return
     clear_shutdown_flag()
+    install_exception_logger()
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     win = PetWindow()

@@ -10,7 +10,7 @@ sys.path.insert(0, str(BASE))
 
 from PySide6.QtCore import QPoint, QRect, QSize
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QWidget
 
 import ai_moe_pet as app
 
@@ -86,12 +86,85 @@ def main():
             tip = app.bubble_tail_tip_x(width, config, target_x=target)
             require(min_tip <= tip <= max_tip, "tail tip escaped clamp bounds")
 
+    pet_rect = QRect(280, 410, 220, 220)
+    center_anchor = app.pet_bubble_anchor_x(pet_rect, avoid_center=False)
+    word_anchor = app.pet_bubble_anchor_x(pet_rect, avoid_center=True, side_hint=1)
+    left_word_anchor = app.pet_bubble_anchor_x(pet_rect, avoid_center=True, side_hint=-1)
+    require(center_anchor == pet_rect.center().x(), "normal bubble no longer points at pet center")
+    require(word_anchor > center_anchor + 16, "word bubble tail did not avoid pet center")
+    require(left_word_anchor < center_anchor - 16, "left-side word bubble tail did not avoid pet center")
+
+    long_word_text = (
+        "考研英语词汇  单击换一批\n"
+        "abbreviation  缩写词，缩略形式\n"
+        "conscientious  认真的，尽责的，一丝不苟的\n"
+        "infrastructure  基础设施，基础结构\n"
+        "phenomenon  现象，特殊的人或事物\n"
+        "substantial  大量的，实质性的，重要的"
+    )
+    _word_width, word_height = bubble.fitted_message_size(bubble.wrap_friendly_text(long_word_text), 440, 0)
+    require(word_height > 220, "word bubble is still capped at the old fixed height")
+    require(word_height <= 420, "word bubble grew beyond the safe dynamic height")
+
+    long_weather = "上海 27°C 局部多云；明天 21~24°C 附近有零星小雨，午后短时阵风，湿度较高，体感偏闷"
+    weather_lines = app.weather_card_text(long_weather).splitlines()
+    require(1 <= len(weather_lines) <= 2, "weather card summary should fit two lines")
+    require(all(len(line) <= 24 for line in weather_lines), "weather card line is too long")
+    require(app.weather_card_text("天气查询失败：network timeout").splitlines() == ["天气查询失败", "点开重试"], "weather error summary changed")
+
+    noop = lambda *_args, **_kwargs: None
+    dummy = QWidget()
+    dummy.config = dict(app.DEFAULT_CONFIG)
+    dummy.config["PetName"] = "糯米"
+    dummy.weather_text = long_weather
+    for name in (
+        "study_summary",
+        "open_today_board",
+        "open_todos",
+        "open_calendar",
+        "open_weather",
+        "open_mail",
+        "open_core_toolbox",
+        "open_claude_code",
+        "open_ai",
+        "ocr_screenshot",
+        "open_file_search",
+        "open_performance",
+        "open_desktop_organizer",
+        "open_word_popup",
+        "open_formula_search",
+        "open_translate",
+        "open_clipboard",
+        "open_action_lab",
+        "open_diagnostics",
+        "open_notebook",
+        "open_battery",
+        "toggle_bubble_enabled",
+        "toggle_word_popup",
+        "open_feature_switch",
+        "open_settings",
+        "open_help",
+        "hide_to_tray",
+        "restart_pet",
+        "exit_pet",
+    ):
+        setattr(dummy, name, noop)
+    menu = app.PetSmartMenu(dummy)
+    require(menu.scroll is None, "full smart menu should fit without scroll on the default geometry")
+    require(menu.height() <= bounds.height(), "smart menu should stay within the screen height")
+    menu.close()
+    dummy.close()
+
     bubble.close()
     print(
         {
             "screen_bounds": [bounds.left(), bounds.top(), bounds.width(), bounds.height()],
             "default_pos": [default_pos.x(), default_pos.y()],
             "bubble_tail": "merged_path_no_base_seam",
+            "word_tail": "shoulder_anchor",
+            "word_height": word_height,
+            "weather_lines": len(weather_lines),
+            "smart_menu_scroll": False,
         }
     )
     return 0
