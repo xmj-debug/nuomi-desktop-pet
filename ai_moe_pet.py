@@ -47,7 +47,7 @@ from xml.sax.saxutils import escape as xml_escape
 import httpx
 import psutil
 from PIL import Image
-from PySide6.QtCore import QAbstractNativeEventFilter, QEasingCurve, QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QAbstractNativeEventFilter, QEvent, QObject, QEasingCurve, QPoint, QPropertyAnimation, QRect, QRectF, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QCursor, QFont, QIcon, QKeyEvent, QPainter, QPainterPath, QPen, QPixmap, QShortcut, QTextCursor, QTransform
 from PySide6.QtWidgets import (
     QApplication,
@@ -1536,6 +1536,21 @@ def update_public_files(include_assets=False):
     return sorted(set(paths), key=lambda item: item.relative_to(BASE).as_posix())
 
 
+def update_package_bytes(path, rel, version):
+    raw = path.read_bytes()
+    if rel == "ai_moe_pet.py" and str(version) != APP_VERSION:
+        text = raw.decode("utf-8")
+        updated = re.sub(
+            r'^APP_VERSION\s*=\s*"[^"]+"',
+            f'APP_VERSION = "{version}"',
+            text,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        raw = updated.encode("utf-8")
+    return raw
+
+
 def create_update_package(target_path, version=APP_VERSION, include_assets=False):
     target = Path(target_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1543,7 +1558,7 @@ def create_update_package(target_path, version=APP_VERSION, include_assets=False
     with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in update_public_files(include_assets=include_assets):
             rel = path.relative_to(BASE).as_posix()
-            raw = path.read_bytes()
+            raw = update_package_bytes(path, rel, version)
             archive.writestr(rel, raw)
             entries.append(
                 {
@@ -1921,6 +1936,53 @@ def install_exception_logger():
     sys.excepthook = handle_exception
 
 
+class WheelValueGuard(QObject):
+    guarded_types = (QSpinBox, QComboBox, QDateTimeEdit, QFontComboBox)
+
+    def eventFilter(self, obj, event):
+        if event.type() != QEvent.Type.Wheel or not isinstance(obj, self.guarded_types):
+            return super().eventFilter(obj, event)
+        if event.modifiers() & Qt.ControlModifier:
+            return super().eventFilter(obj, event)
+        if isinstance(obj, QComboBox):
+            try:
+                if obj.view().isVisible():
+                    return super().eventFilter(obj, event)
+            except Exception:
+                pass
+        self.scroll_parent_area(obj, event)
+        event.accept()
+        return True
+
+    def scroll_parent_area(self, widget, event):
+        parent = widget.parent()
+        while parent is not None and not isinstance(parent, QAbstractScrollArea):
+            parent = parent.parent()
+        if parent is None:
+            return
+        bar = parent.verticalScrollBar()
+        if bar is None or bar.maximum() <= bar.minimum():
+            return
+        pixel_delta = event.pixelDelta().y()
+        if pixel_delta:
+            amount = pixel_delta
+        else:
+            step = max(20, bar.singleStep() * 3)
+            amount = int(event.angleDelta().y() / 120 * step)
+        if amount:
+            bar.setValue(bar.value() - amount)
+
+
+WHEEL_VALUE_GUARD = None
+
+
+def install_wheel_value_guard(app):
+    global WHEEL_VALUE_GUARD
+    if WHEEL_VALUE_GUARD is None:
+        WHEEL_VALUE_GUARD = WheelValueGuard(app)
+        app.installEventFilter(WHEEL_VALUE_GUARD)
+
+
 def git_command(args, timeout=120, check=True):
     completed = subprocess.run(
         ["git", *args],
@@ -1936,6 +1998,98 @@ def git_command(args, timeout=120, check=True):
         output = (completed.stderr or completed.stdout or "").strip()
         raise RuntimeError(output or f"git {' '.join(args)} 失败")
     return completed
+
+
+def gh_command(args, timeout=120, check=True):
+    gh = shutil.which("gh")
+    if not gh:
+        raise RuntimeError("没有找到 GitHub CLI（gh）。代码可以推送，但另一台电脑要检测更新，需要安装并登录 gh 后发布 Release。")
+    completed = subprocess.run(
+        [gh, *args],
+        cwd=str(BASE),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform.startswith("win") else 0,
+    )
+    if check and completed.returncode != 0:
+        output = (completed.stderr or completed.stdout or "").strip()
+        raise RuntimeError(output or f"gh {' '.join(args)} 失败")
+    return completed
+
+
+def github_repo_from_remote(remote_url):
+    value = str(remote_url or "").strip()
+    patterns = [
+        r"github\.com[:/](?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$",
+        r"^https?://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+?)(?:\.git)?/?$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, value)
+        if match:
+            return f"{match.group('owner')}/{match.group('repo')}"
+    return ""
+
+
+def next_github_release_version(repo):
+    versions = [version_tuple(APP_VERSION)]
+    result = gh_command(
+        ["release", "list", "--repo", repo, "--limit", "30", "--json", "tagName"],
+        timeout=60,
+        check=False,
+    )
+    if result.returncode == 0:
+        try:
+            for item in json.loads(result.stdout or "[]"):
+                tag = str(item.get("tagName", "")).lstrip("vV")
+                if tag:
+                    versions.append(version_tuple(tag))
+        except Exception:
+            pass
+    major, minor, patch = max(versions)
+    return f"{major}.{minor}.{patch + 1}"
+
+
+def publish_github_update_release(repo, branch, commit_hash):
+    version = next_github_release_version(repo)
+    UPDATE_DIR.mkdir(exist_ok=True)
+    package = UPDATE_DIR / f"nuomi-update-{version}.zip"
+    create_update_package(package, version=version, include_assets=True)
+    tag = f"v{version}"
+    notes = (
+        f"糯米手动上传发布。\n\n"
+        f"- 分支：{branch}\n"
+        f"- 提交：{commit_hash}\n"
+        f"- 更新包：{package.name}\n"
+        f"- 另一台电脑可在备份 / 迁移里点击“检查联网更新”。"
+    )
+    gh_command(
+        [
+            "release",
+            "create",
+            tag,
+            str(package),
+            "--repo",
+            repo,
+            "--target",
+            branch,
+            "--title",
+            f"糯米 {version}",
+            "--notes",
+            notes,
+            "--latest",
+        ],
+        timeout=300,
+    )
+    return {
+        "ok": True,
+        "repo": repo,
+        "version": version,
+        "tag": tag,
+        "package": str(package),
+    }
 
 
 def github_backup_is_blocked_path(value):
@@ -1961,7 +2115,7 @@ def github_backup_is_blocked_path(value):
     return False
 
 
-def manual_github_backup():
+def manual_github_backup(publish_update=False):
     if not (BASE / ".git").exists():
         raise RuntimeError("当前项目不是 Git 仓库，无法上传到 GitHub。")
     remote_result = git_command(["remote", "get-url", "--push", "origin"], timeout=20)
@@ -2006,6 +2160,22 @@ def manual_github_backup():
     commit_hash = git_command(["rev-parse", "--short", "HEAD"], timeout=20).stdout.strip()
     push_result = git_command(["push", "origin", branch], timeout=300)
     push_output = (push_result.stdout or push_result.stderr or "").strip()
+    update_release = {"requested": bool(publish_update), "ok": False}
+    if publish_update:
+        release_repo = update_repo_name(load_config())
+        origin_repo = github_repo_from_remote(remote_url)
+        if origin_repo and release_repo == DEFAULT_UPDATE_REPO:
+            release_repo = origin_repo
+        try:
+            update_release = publish_github_update_release(release_repo, branch, commit_hash)
+            update_release["requested"] = True
+        except Exception as exc:
+            update_release = {
+                "requested": True,
+                "ok": False,
+                "repo": release_repo,
+                "error": str(exc),
+            }
     append_runtime_log(f"github backup pushed branch={branch} commit={commit_hash} files={len(staged_files)}")
     return {
         "remote": remote_url,
@@ -2014,6 +2184,7 @@ def manual_github_backup():
         "committed": committed,
         "files": staged_files,
         "push_output": push_output,
+        "update_release": update_release,
     }
 
 
@@ -8540,9 +8711,13 @@ class OnlineUpdateWorker(QThread):
 class GitHubBackupWorker(QThread):
     result = Signal(object)
 
+    def __init__(self, publish_update=False, parent=None):
+        super().__init__(parent)
+        self.publish_update = bool(publish_update)
+
     def run(self):
         try:
-            self.result.emit({"ok": True, **manual_github_backup()})
+            self.result.emit({"ok": True, **manual_github_backup(publish_update=self.publish_update)})
         except Exception as exc:
             self.result.emit({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
@@ -8762,12 +8937,16 @@ class BackupDialog(QDialog):
         github_hint = QLabel("上传程序代码到 GitHub 仓库；不会上传 pet-config.json、聊天记录、邮箱状态、备份包和截图。")
         github_hint.setObjectName("hint")
         github_hint.setWordWrap(True)
+        self.publish_update_release = QCheckBox("同时发布联网更新包（另一台电脑可检测到）")
+        self.publish_update_release.setChecked(True)
         github_row.addWidget(self.github_backup_btn)
         github_row.addWidget(github_hint, 1)
         layout.addLayout(github_row)
+        layout.addWidget(self.publish_update_release)
         self.update_btn.setVisible(feature_enabled(load_config(), "OnlineUpdateFeatureEnabled"))
         self.github_backup_btn.setVisible(feature_enabled(load_config(), "GithubUploadFeatureEnabled"))
         github_hint.setVisible(feature_enabled(load_config(), "GithubUploadFeatureEnabled"))
+        self.publish_update_release.setVisible(feature_enabled(load_config(), "GithubUploadFeatureEnabled"))
         self.update_worker = None
         self.github_backup_worker = None
         self.backup_export_worker = None
@@ -8823,13 +9002,18 @@ class BackupDialog(QDialog):
             "手动上传到 GitHub",
             "将把当前程序代码提交并推送到 GitHub origin。\n\n"
             "不会上传 pet-config.json、聊天记录、剪贴板、邮箱状态、备份包、截图等个人数据。\n\n"
+            "如果勾选“同时发布联网更新包”，还会用 GitHub CLI 发布 Release；另一台电脑就是通过这个 Release 检测更新。\n\n"
             "现在开始上传吗？",
         )
         if reply != QMessageBox.Yes:
             return
         self.github_backup_btn.setEnabled(False)
-        self.status.setText("正在手动上传到 GitHub：检查敏感文件、创建提交并推送到远程仓库……")
-        self.github_backup_worker = GitHubBackupWorker(self)
+        publish_update = self.publish_update_release.isChecked()
+        self.status.setText(
+            "正在手动上传到 GitHub：检查敏感文件、创建提交并推送到远程仓库"
+            + ("，并发布联网更新包……" if publish_update else "……")
+        )
+        self.github_backup_worker = GitHubBackupWorker(publish_update=publish_update, parent=self)
         self.github_backup_worker.result.connect(self.github_backup_finished)
         self.github_backup_worker.start()
 
@@ -8847,6 +9031,19 @@ class BackupDialog(QDialog):
             summary = f"已上传到 GitHub：分支 {branch}，提交 {commit_hash}，包含 {len(files)} 个文件。"
         else:
             summary = f"GitHub 已检查：没有新的本地改动，远程分支 {branch} 已是提交 {commit_hash}。"
+        update_release = result.get("update_release") or {}
+        if update_release.get("requested"):
+            if update_release.get("ok"):
+                summary += (
+                    f"\n\n已发布联网更新包：{update_release.get('tag')} "
+                    f"({update_release.get('repo')})。另一台电脑现在可以检查更新。"
+                )
+            else:
+                summary += (
+                    "\n\n注意：代码已经上传，但联网更新包没有发布成功。"
+                    "另一台电脑暂时检测不到这次更新。\n原因："
+                    + update_release.get("error", "未知错误")
+                )
         self.status.setText(summary)
         QMessageBox.information(self, "GitHub 上传完成", summary)
 
@@ -13549,6 +13746,7 @@ def main():
     clear_shutdown_flag()
     install_exception_logger()
     app = QApplication(sys.argv)
+    install_wheel_value_guard(app)
     app.setQuitOnLastWindowClosed(False)
     win = PetWindow()
     win.show()
