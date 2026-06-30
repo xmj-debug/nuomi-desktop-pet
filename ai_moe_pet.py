@@ -560,6 +560,13 @@ def feature_label(key):
     return FEATURE_SWITCH_LABELS.get(key, key)
 
 
+def feature_display_label(key, config=None):
+    if key == "AiFeatureEnabled":
+        name = str((config or {}).get("PetName") or DEFAULT_CONFIG["PetName"]).strip() or DEFAULT_CONFIG["PetName"]
+        return f"和{name}聊聊"
+    return feature_label(key)
+
+
 def safe_enable_feature_config(config):
     for item in FEATURE_SWITCH_ITEMS:
         if item["safe"]:
@@ -569,6 +576,478 @@ def safe_enable_feature_config(config):
 def reset_feature_config_defaults(config):
     for key in FEATURE_SWITCH_KEYS:
         config[key] = DEFAULT_CONFIG.get(key, True)
+
+
+SETTING_SECRET_WORDS = (
+    "api key",
+    "apikey",
+    "api密钥",
+    "密钥",
+    "密码",
+    "邮箱密码",
+    "mailpassword",
+    "gmailpassword",
+    "aipassword",
+    "token",
+    "令牌",
+)
+SETTING_ACTION_WORDS = (
+    "设置",
+    "修改",
+    "更改",
+    "改成",
+    "改为",
+    "设为",
+    "调成",
+    "调整",
+    "打开",
+    "开启",
+    "启用",
+    "关闭",
+    "关掉",
+    "禁用",
+    "停用",
+    "恢复默认",
+    "安全全开启",
+    "一键全开启",
+    "移动",
+    "以后",
+    "从现在起",
+    "上移",
+    "下移",
+    "左移",
+    "右移",
+    "向上",
+    "向下",
+    "向左",
+    "向右",
+)
+SETTING_ON_WORDS = ("开启", "打开", "启用", "允许", "恢复", "显示", "开一下", "打开一下", "全开启")
+SETTING_OFF_WORDS = ("关闭", "关掉", "关了", "禁用", "停用", "取消", "不要", "别", "禁止")
+SETTING_NUMBER_RE = re.compile(r"-?\d+(?:\.\d+)?")
+SETTING_COLOR_NAMES = {
+    "黑色": "#111827",
+    "白色": "#ffffff",
+    "蓝色": "#2563eb",
+    "浅蓝": "#38bdf8",
+    "绿色": "#16a34a",
+    "红色": "#dc2626",
+    "粉色": "#ec4899",
+    "紫色": "#7c3aed",
+    "黄色": "#fbbf24",
+    "橙色": "#f97316",
+    "灰色": "#475569",
+    "透明黑": "#111827",
+}
+
+NATURAL_BOOL_SETTINGS = [
+    ("BubbleEnabled", "气泡显示", ("气泡", "对话框", "说话框", "聊天气泡")),
+    ("Topmost", "窗口置顶", ("置顶", "窗口置顶", "桌宠置顶", "总在最前")),
+    ("LockPetPosition", "锁定桌宠位置", ("锁定位置", "固定位置", "桌宠位置固定", "别乱跑", "不要乱跑")),
+    ("ShowStatus", "桌面状态标签", ("状态标签", "桌面标签", "状态小标签")),
+    ("VoiceEnabled", "语音播报", ("语音播报", "朗读气泡", "桌宠朗读")),
+    ("ChatVoiceReplies", "AI 回复朗读", ("AI回复朗读", "聊天回复朗读", "自动朗读回复")),
+    ("ClipboardHistoryEnabled", "剪贴板记录", ("剪贴板记录", "剪贴板历史")),
+    ("QuietMode", "安静模式", ("安静模式", "勿扰模式")),
+    ("AutoQuietFullscreen", "全屏自动安静", ("全屏自动安静", "全屏安静", "全屏减少打扰")),
+    ("AutoHideFullscreen", "全屏游戏自动隐藏", ("全屏游戏自动隐藏", "游戏全屏隐藏", "全屏隐藏桌宠")),
+    ("AutoHideGames", "游戏前台自动隐藏", ("游戏前台自动隐藏", "检测游戏隐藏", "游戏隐藏桌宠")),
+    ("AutoStart", "开机自启", ("开机自启", "开机自动启动", "登录自动启动")),
+    ("WatchdogEnabled", "自恢复守护", ("自恢复守护", "守护进程", "异常重启")),
+    ("SystemHealthWatchEnabled", "电脑异常检测", ("电脑异常检测", "系统异常检测", "电脑状态提醒", "CPU提醒")),
+    ("BatteryAlertsEnabled", "电池提醒", ("电池提醒", "低电量提醒", "充满提醒")),
+    ("FullscreenReminderOnly", "全屏仅提醒发声", ("全屏仅提醒发声", "全屏只提醒", "全屏只允许提醒")),
+    ("word_popup_enabled", "考研单词", ("单词弹窗", "考研单词", "单词气泡", "单词功能", "词汇弹窗")),
+    ("AiFeatureEnabled", "AI 聊天", ("AI聊天", "聊天功能", "问问", "问我", "问糯米")),
+    ("TodayFeatureEnabled", "今日看板", ("今日看板", "今日功能")),
+    ("TodoFeatureEnabled", "提醒事项", ("提醒事项", "待办功能", "提醒功能")),
+    ("CalendarFeatureEnabled", "日程", ("日程功能", "日历功能")),
+    ("WeatherFeatureEnabled", "天气", ("天气功能", "天气卡片")),
+    ("MailFeatureEnabled", "邮件", ("邮件功能", "邮箱功能")),
+    ("StudyFeatureEnabled", "考研 / 学习统计", ("考研功能", "学习统计", "番茄记录")),
+    ("FormulaFeatureEnabled", "数学公式", ("数学公式", "公式速查", "公式功能")),
+    ("OcrFeatureEnabled", "截图 OCR", ("截图OCR", "OCR功能", "截图识别")),
+    ("TranslateFeatureEnabled", "翻译", ("翻译功能", "翻译窗口")),
+    ("FileSearchFeatureEnabled", "文件搜索", ("文件搜索", "搜索文件")),
+    ("PerformanceFeatureEnabled", "清理 / 性能", ("清理功能", "性能工具", "进程查看")),
+    ("DesktopOrganizerFeatureEnabled", "桌面整理", ("桌面整理", "整理桌面")),
+    ("BackupFeatureEnabled", "备份 / 迁移", ("备份功能", "迁移功能")),
+    ("ClaudeFeatureEnabled", "Claude Code", ("Claude功能", "Claude Code", "启动Claude")),
+    ("ToolboxFeatureEnabled", "核心工具箱", ("工具箱", "核心工具箱")),
+    ("DiagnosticsFeatureEnabled", "诊断中心", ("诊断中心", "诊断功能")),
+    ("ActionLabFeatureEnabled", "动作实验室", ("动作实验室", "动作功能")),
+    ("NotebookFeatureEnabled", "词库 / 笔记", ("词库", "笔记本", "单词本")),
+    ("BatteryFeatureEnabled", "电池工具", ("电池工具", "电池窗口")),
+    ("OnlineUpdateFeatureEnabled", "联网检查更新", ("联网检查更新", "检查联网更新", "在线更新")),
+    ("GithubUploadFeatureEnabled", "手动上传到 GitHub", ("上传GitHub", "GitHub上传", "手动上传")),
+    ("ClaudeAlwaysChinese", "Claude 中文模式", ("Claude中文", "Claude一直中文", "Claude中文界面")),
+    ("ClaudeSafeMode", "Claude 安全模式", ("Claude安全模式", "Claude保守模式")),
+    ("BubbleFontBold", "气泡粗体", ("气泡粗体", "气泡文字加粗", "文字加粗")),
+    ("BubbleFontItalic", "气泡斜体", ("气泡斜体", "气泡文字斜体", "文字斜体")),
+]
+
+NATURAL_NUMBER_SETTINGS = [
+    ("PetSize", "桌宠大小", ("桌宠大小", "宠物大小", "角色大小", "桌宠尺寸"), 120, 360, "px"),
+    ("BubbleFontSize", "气泡字号", ("气泡字号", "气泡字体大小", "气泡文字大小"), 10, 24, "px"),
+    ("DesktopLabelFontSize", "桌面标签字号", ("桌面标签字号", "状态标签字号", "小标签字号"), 9, 20, "px"),
+    ("DialogFontSize", "弹窗字号", ("弹窗字号", "窗口字号", "对话窗口字号"), 11, 22, "px"),
+    ("MenuFontSize", "菜单字号", ("菜单字号", "右键菜单字号", "快捷菜单字号"), 10, 22, "px"),
+    ("BubbleBorderWidth", "气泡边框宽度", ("气泡边框宽度", "气泡描边宽度", "气泡边框"), 1, 8, "px"),
+    ("BubbleBorderRadius", "气泡圆角", ("气泡圆角", "气泡圆角大小"), 4, 32, "px"),
+    ("BubbleWidth", "气泡宽度", ("气泡宽度", "对话框宽度", "气泡框宽度"), 0, 680, "px_auto"),
+    ("BubbleHeight", "气泡高度", ("气泡高度", "对话框高度", "气泡框高度"), 0, 360, "px_auto"),
+    ("BubbleOffsetX", "气泡横向位置", ("气泡横向位置", "气泡X", "气泡x", "气泡左右偏移"), -1200, 1200, "signed_px"),
+    ("BubbleOffsetY", "气泡纵向位置", ("气泡纵向位置", "气泡Y", "气泡y", "气泡上下偏移"), -1200, 1200, "signed_px"),
+    ("FocusMinutes", "专注时长", ("专注时长", "番茄时长", "学习时长"), 5, 180, "分钟"),
+    ("RestMinutes", "休息时长", ("休息时长", "番茄休息"), 1, 60, "分钟"),
+    ("VoiceVolume", "语音音量", ("语音音量", "朗读音量", "声音音量"), 0, 100, "%"),
+    ("VoiceRate", "语速", ("语速", "朗读速度"), -5, 5, ""),
+    ("AmbientVoiceCooldownMinutes", "主动说话间隔", ("主动说话间隔", "语音冷却", "冒泡说话间隔"), 0, 120, "分钟"),
+    ("OneCorePitchPercent", "离线语音音调", ("离线语音音调", "瑶瑶音调", "OneCore音调"), -20, 20, "%"),
+    ("EdgePitchHz", "在线语音音调", ("在线语音音调", "晓晓音调", "Edge音调"), -50, 50, "Hz"),
+    ("CpuAlertPercent", "CPU 提醒阈值", ("CPU阈值", "CPU提醒阈值", "CPU占用提醒"), 50, 100, "%"),
+    ("MemoryAlertPercent", "内存提醒阈值", ("内存阈值", "内存提醒阈值", "内存占用提醒"), 50, 100, "%"),
+    ("DiskAlertPercent", "磁盘提醒阈值", ("磁盘阈值", "磁盘提醒阈值", "磁盘占用提醒"), 70, 100, "%"),
+    ("BatteryLowPercent", "低电量阈值", ("低电量阈值", "低电量提醒阈值"), 5, 40, "%"),
+    ("BatteryFullPercent", "充满提醒阈值", ("充满阈值", "满电提醒阈值", "充满提醒阈值"), 80, 100, "%"),
+    ("HealthAlertCooldownMinutes", "异常提醒间隔", ("异常提醒间隔", "电脑异常提醒间隔", "健康提醒间隔"), 3, 120, "分钟"),
+]
+
+
+def _setting_clean_value(value):
+    return str(value or "").strip().strip("“”\"' ，,。.!！；;：:")
+
+
+def _setting_first_number(text):
+    match = SETTING_NUMBER_RE.search(str(text or ""))
+    return float(match.group(0)) if match else None
+
+
+def _setting_number_for_alias(text, alias, allow_global=False):
+    raw = str(text or "")
+    start = raw.find(alias)
+    while start >= 0:
+        window = raw[start : start + len(alias) + 28]
+        number = _setting_first_number(window)
+        if number is not None:
+            return number
+        start = raw.find(alias, start + len(alias))
+    if allow_global:
+        numbers = SETTING_NUMBER_RE.findall(raw)
+        if len(numbers) == 1:
+            return float(numbers[0])
+    return None
+
+
+def _setting_bool_value(text, aliases):
+    raw = str(text or "")
+    windows = []
+    for alias in aliases:
+        start = raw.find(alias)
+        while start >= 0:
+            windows.append(raw[max(0, start - 12) : start + len(alias) + 20])
+            start = raw.find(alias, start + len(alias))
+    source = "\n".join(windows) if windows else raw
+    if any(word in source for word in SETTING_OFF_WORDS):
+        return False
+    if any(word in source for word in SETTING_ON_WORDS):
+        return True
+    return None
+
+
+def _setting_clamped_int(number, low, high):
+    return max(low, min(high, int(round(number))))
+
+
+def _setting_number_display(value, unit):
+    if unit == "px_auto":
+        return "自动" if int(value) <= 0 else f"{int(value)}px"
+    if unit == "signed_px":
+        return f"{int(value):+d}px"
+    return f"{int(value)}{unit}" if unit else str(int(value))
+
+
+def _setting_color_from_text(text):
+    raw = str(text or "")
+    match = re.search(r"#[0-9a-fA-F]{3,8}", raw)
+    if match:
+        return normalize_color(match.group(0), "")
+    for name, color in SETTING_COLOR_NAMES.items():
+        if name in raw:
+            return color
+    return ""
+
+
+def _setting_date_from_text(text):
+    raw = str(text or "")
+    match = re.search(r"(\d{4})\s*[年\-/.]\s*(\d{1,2})\s*[月\-/.]\s*(\d{1,2})", raw)
+    if not match:
+        match = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?", raw)
+        if not match:
+            return ""
+        year = datetime.now().year
+        month = int(match.group(1))
+        day = int(match.group(2))
+    else:
+        year = int(match.group(1))
+        month = int(match.group(2))
+        day = int(match.group(3))
+    try:
+        return datetime(year, month, day).strftime("%Y-%m-%d")
+    except ValueError:
+        return ""
+
+
+def _setting_text_after_patterns(text, patterns):
+    raw = str(text or "")
+    for pattern in patterns:
+        match = re.search(pattern, raw, flags=re.IGNORECASE)
+        if match:
+            value = _setting_clean_value(match.group(1))
+            if value:
+                return value
+    return ""
+
+
+def _setting_apply_bubble_size_pair(raw, add_change):
+    if "气泡" not in raw and "对话框" not in raw and "说话框" not in raw:
+        return
+    if any(word in raw for word in ("自动大小", "自动调节", "自动宽高", "大小自动")):
+        add_change("BubbleWidth", 0, "气泡宽度", "自动")
+        add_change("BubbleHeight", 0, "气泡高度", "自动")
+        return
+    match = re.search(r"(\d{2,3})\s*[xX×*]\s*(\d{2,3})", raw)
+    if not match:
+        return
+    width = _setting_clamped_int(float(match.group(1)), 0, 680)
+    height = _setting_clamped_int(float(match.group(2)), 0, 360)
+    add_change("BubbleWidth", width, "气泡宽度", _setting_number_display(width, "px_auto"))
+    add_change("BubbleHeight", height, "气泡高度", _setting_number_display(height, "px_auto"))
+
+
+def _setting_apply_bubble_direction(raw, config, add_change):
+    if "气泡" not in raw and "对话框" not in raw and "说话框" not in raw:
+        return
+    if not any(word in raw for word in ("向上", "往上", "上移", "向下", "往下", "下移", "向左", "往左", "左移", "向右", "往右", "右移")):
+        return
+    amount = _setting_first_number(raw)
+    if amount is None:
+        amount = 20
+    amount = int(round(amount))
+    x = clamp_int(config.get("BubbleOffsetX"), -1200, 1200, DEFAULT_CONFIG["BubbleOffsetX"])
+    y = clamp_int(config.get("BubbleOffsetY"), -1200, 1200, DEFAULT_CONFIG["BubbleOffsetY"])
+    if any(word in raw for word in ("向上", "往上", "上移")):
+        y -= amount
+    if any(word in raw for word in ("向下", "往下", "下移")):
+        y += amount
+    if any(word in raw for word in ("向左", "往左", "左移")):
+        x -= amount
+    if any(word in raw for word in ("向右", "往右", "右移")):
+        x += amount
+    x = _setting_clamped_int(x, -1200, 1200)
+    y = _setting_clamped_int(y, -1200, 1200)
+    add_change("BubbleOffsetX", x, "气泡横向位置", _setting_number_display(x, "signed_px"))
+    add_change("BubbleOffsetY", y, "气泡纵向位置", _setting_number_display(y, "signed_px"))
+
+
+def parse_natural_setting_changes(text, config, pet_name=None):
+    raw = str(text or "").strip()
+    lowered = raw.lower()
+    intent_words = SETTING_ACTION_WORDS + SETTING_ON_WORDS + SETTING_OFF_WORDS
+    if not raw or not any(word.lower() in lowered for word in intent_words):
+        return {"handled": False}
+
+    draft = dict(config or {})
+    notes = []
+    blocked = []
+    noops = []
+
+    def add_change(key, value, label, display=None):
+        old = draft.get(key, DEFAULT_CONFIG.get(key))
+        if old == value:
+            noops.append(f"{label} 已经是 {display if display is not None else value}")
+            return
+        draft[key] = value
+        notes.append(f"{label}：{display if display is not None else value}")
+
+    if any(word in lowered for word in SETTING_SECRET_WORDS):
+        blocked.append("密钥、密码和令牌类设置请在设置窗口里手动修改，避免聊天误改或泄露。")
+
+    if ("功能" in raw or "开关" in raw) and any(word in raw for word in ("安全全开启", "一键全开启", "全开启")):
+        before = {key: draft.get(key, DEFAULT_CONFIG.get(key)) for key in FEATURE_SWITCH_KEYS}
+        safe_enable_feature_config(draft)
+        if any(draft.get(key) != value for key, value in before.items()):
+            notes.append("功能开关：已安全全开启普通功能")
+        else:
+            noops.append("功能开关已经是安全全开启状态")
+
+    if ("功能" in raw or "开关" in raw) and "恢复默认" in raw:
+        reset_feature_config_defaults(draft)
+        notes.append("功能开关：已恢复默认")
+
+    name_value = _setting_text_after_patterns(
+        raw,
+        [
+            r"(?:把)?(?:桌宠|宠物|你的|你)?(?:名字|昵称)\s*(?:改成|改为|设为|设置为|叫做|叫成|叫)\s*([^\s，。！!；;]+)",
+            r"(?:以后|从现在起).{0,6}(?:你|桌宠|宠物)?(?:就)?叫\s*([^\s，。！!；;]+)",
+        ],
+    )
+    if name_value:
+        add_change("PetName", name_value[:16], "桌宠名字", name_value[:16])
+
+    city_value = _setting_text_after_patterns(
+        raw,
+        [r"(?:天气城市|天气位置|默认城市)\s*(?:改成|改为|设为|设置为|调成)\s*([^\s，。！!；;]+)"],
+    )
+    if city_value:
+        add_change("WeatherCity", city_value[:24], "天气城市", city_value[:24])
+
+    subject_value = _setting_text_after_patterns(
+        raw,
+        [r"(?:学习科目|专注科目|复习科目|科目)\s*(?:改成|改为|设为|设置为|调成)\s*([^\s，。！!；;]+)"],
+    )
+    if subject_value:
+        add_change("Subject", subject_value[:24], "学习科目", subject_value[:24])
+
+    font_value = _setting_text_after_patterns(
+        raw,
+        [r"(?:文字字体|界面字体|字体)\s*(?:改成|改为|设为|设置为|调成)\s*([A-Za-z0-9_\-\u4e00-\u9fff ]{2,64})"],
+    )
+    if font_value:
+        add_change("TextFontFamily", font_value[:64], "界面字体", font_value[:64])
+
+    mail_keywords_value = _setting_text_after_patterns(
+        raw,
+        [r"(?:邮件关键词|邮箱关键词|邮件提醒关键词)\s*(?:改成|改为|设为|设置为)\s*([^\n。！!；;]+)"],
+    )
+    if mail_keywords_value:
+        keywords = [
+            item.strip()
+            for item in re.split(r"[,，、\s]+", mail_keywords_value)
+            if item.strip()
+        ]
+        if keywords:
+            value = ",".join(keywords[:30])
+            add_change("MailKeywords", value, "邮件关键词", value)
+
+    model_value = _setting_text_after_patterns(
+        raw,
+        [r"(?:AI模型|聊天模型|模型)\s*(?:改成|改为|设为|设置为)\s*([A-Za-z0-9_.:/-]+)"],
+    )
+    if model_value:
+        add_change("AiModel", model_value[:80], "AI 模型", model_value[:80])
+
+    if any(alias in raw for alias in ("考研日期", "考试日期", "考试时间")):
+        date_value = _setting_date_from_text(raw)
+        if date_value:
+            add_change("ExamDate", date_value, "考研日期", date_value)
+
+    if any(alias in raw for alias in ("语音引擎", "声音引擎", "朗读引擎", "语音模式")):
+        if any(word in raw for word in ("在线", "晓晓", "edge", "Edge")):
+            add_change("VoiceEngine", "edge", "语音引擎", "在线晓晓")
+        elif any(word in raw for word in ("离线", "瑶瑶", "onecore", "OneCore")):
+            add_change("VoiceEngine", "onecore", "语音引擎", "离线瑶瑶")
+        elif "windows" in lowered or "传统" in raw:
+            add_change("VoiceEngine", "windows", "语音引擎", "Windows 传统语音")
+
+    if "OCR" in raw.upper() or "识别语言" in raw:
+        if any(word in raw for word in ("中英", "中文英文", "中文和英文", "英文中文", "英中")):
+            add_change("OcrLanguage", "chi_sim+eng", "OCR 语言", "中文+英文")
+        elif any(word in raw for word in ("英文", "英语", "eng")):
+            add_change("OcrLanguage", "eng", "OCR 语言", "英文")
+        elif any(word in raw for word in ("中文", "简体", "汉字")):
+            add_change("OcrLanguage", "chi_sim", "OCR 语言", "中文")
+
+    voice_aliases = {
+        "晓晓": ("VoiceEngine", "edge", "EdgeVoice", "zh-CN-XiaoxiaoNeural", "晓晓"),
+        "小小": ("VoiceEngine", "edge", "EdgeVoice", "zh-CN-XiaoxiaoNeural", "晓晓"),
+        "晓伊": ("VoiceEngine", "edge", "EdgeVoice", "zh-CN-XiaoyiNeural", "晓伊"),
+        "晓双": ("VoiceEngine", "edge", "EdgeVoice", "zh-CN-XiaoshuangNeural", "晓双"),
+        "云希": ("VoiceEngine", "edge", "EdgeVoice", "zh-CN-YunxiNeural", "云希"),
+        "云健": ("VoiceEngine", "edge", "EdgeVoice", "zh-CN-YunjianNeural", "云健"),
+        "瑶瑶": ("VoiceEngine", "onecore", "OneCoreVoice", "Microsoft Yaoyao", "瑶瑶"),
+        "耀耀": ("VoiceEngine", "onecore", "OneCoreVoice", "Microsoft Yaoyao", "瑶瑶"),
+        "慧慧": ("VoiceEngine", "onecore", "OneCoreVoice", "Microsoft Huihui", "慧慧"),
+        "康康": ("VoiceEngine", "onecore", "OneCoreVoice", "Microsoft Kangkang", "康康"),
+    }
+    if any(word in raw for word in ("声音", "语音", "音色", "朗读")):
+        for alias, (engine_key, engine, voice_key, voice_id, voice_label) in voice_aliases.items():
+            if alias not in raw:
+                continue
+            add_change(engine_key, engine, "语音引擎", "在线神经语音" if engine == "edge" else "离线 OneCore")
+            add_change(voice_key, voice_id, "语音角色", voice_label)
+            break
+
+    color_targets = [
+        ("BubbleTextColor", "气泡文字颜色", ("气泡文字颜色", "气泡字体颜色", "文字颜色")),
+        ("BubbleBorderColor", "气泡边框颜色", ("气泡边框颜色", "气泡描边颜色", "边框颜色")),
+        ("BubbleBackgroundColor", "气泡背景颜色", ("气泡背景", "气泡底色", "气泡颜色", "对话框颜色")),
+    ]
+    for key, label, aliases in color_targets:
+        if any(alias in raw for alias in aliases):
+            color = _setting_color_from_text(raw)
+            if color:
+                add_change(key, color, label, color)
+            break
+
+    _setting_apply_bubble_size_pair(raw, add_change)
+    _setting_apply_bubble_direction(raw, draft, add_change)
+
+    matched_numeric = [
+        (key, label, aliases, low, high, unit)
+        for key, label, aliases, low, high, unit in NATURAL_NUMBER_SETTINGS
+        if any(alias in raw for alias in aliases)
+    ]
+    for key, label, aliases, low, high, unit in matched_numeric:
+        number = None
+        for alias in aliases:
+            if alias in raw:
+                number = _setting_number_for_alias(raw, alias, allow_global=len(matched_numeric) == 1)
+                if number is not None:
+                    break
+        if number is None:
+            continue
+        if key == "Opacity":
+            percent = number * 100 if number <= 1 else number
+            percent = _setting_clamped_int(percent, 45, 100)
+            add_change(key, percent / 100, label, f"{percent}%")
+        else:
+            value = _setting_clamped_int(number, low, high)
+            add_change(key, value, label, _setting_number_display(value, unit))
+
+    if any(alias in raw for alias in ("透明度", "不透明度")):
+        number = _setting_first_number(raw)
+        if number is not None:
+            percent = number * 100 if number <= 1 else number
+            percent = _setting_clamped_int(percent, 45, 100)
+            add_change("Opacity", percent / 100, "透明度", f"{percent}%")
+
+    for key, label, aliases in NATURAL_BOOL_SETTINGS:
+        dynamic_aliases = tuple(aliases)
+        if key == "AiFeatureEnabled":
+            current_name = _setting_clean_value(pet_name) or DEFAULT_CONFIG["PetName"]
+            dynamic_aliases = dynamic_aliases + (f"问{current_name}", f"问问{current_name}", f"和{current_name}聊聊")
+        if not any(alias in raw for alias in dynamic_aliases):
+            continue
+        value = _setting_bool_value(raw, dynamic_aliases)
+        if value is None:
+            continue
+        add_change(key, bool(value), label, "开启" if value else "关闭")
+
+    changed_keys = {
+        key
+        for key in set(draft) | set(config or {})
+        if draft.get(key, DEFAULT_CONFIG.get(key)) != (config or {}).get(key, DEFAULT_CONFIG.get(key))
+    }
+    handled = bool(notes or blocked or noops)
+    return {
+        "handled": handled,
+        "config": draft,
+        "changed_keys": changed_keys,
+        "notes": notes,
+        "blocked": blocked,
+        "noops": noops,
+    }
 
 CHINA_HOLIDAYS_2026 = [
     {"name": "元旦", "start": "2026-01-01", "end": "2026-01-03", "days": 3},
@@ -6415,6 +6894,9 @@ class AiDialog(QDialog):
         layout.addLayout(buttons)
         self.refresh_history()
 
+    def pet_name(self):
+        return str(self.config.get("PetName") or DEFAULT_CONFIG["PetName"])
+
     def quick_mode(self, mode, placeholder):
         idx = self.mode.findText(mode)
         if idx >= 0:
@@ -6432,6 +6914,21 @@ class AiDialog(QDialog):
             lines.append(f"[{item.get('mode')}] Q: {item.get('question')}\nA: {item.get('answer')}\n")
         self.history.setPlainText("\n".join(lines))
 
+    def save_chat_turn(self, question, answer, notes=None, reminder_note=""):
+        items = load_json(CHAT, [])
+        items.append(
+            {
+                "id": str(time.time()),
+                "mode": self.mode.currentText(),
+                "question": question,
+                "answer": answer,
+                "memory_notes": notes or [],
+                "reminder_note": reminder_note,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+        save_json(CHAT, items)
+
     def send(self):
         question = self.input.toPlainText().strip()
         if not question:
@@ -6441,10 +6938,17 @@ class AiDialog(QDialog):
         self.history.append(f"\n[{self.mode.currentText()}] Q: {question}\nA: ")
         self.pending_reminder_note = ""
         parent = self.parent()
+        if parent and hasattr(parent, "try_apply_natural_settings"):
+            setting_answer = parent.try_apply_natural_settings(question) or ""
+            if setting_answer:
+                self.history.insertPlainText(setting_answer)
+                self.save_chat_turn(question, setting_answer)
+                self.input.clear()
+                return
         if parent and hasattr(parent, "try_add_natural_reminder"):
             self.pending_reminder_note = parent.try_add_natural_reminder(question) or ""
             if self.pending_reminder_note:
-                self.history.append(f"\n糯米记下提醒：{self.pending_reminder_note}\n")
+                self.history.append(f"\n{self.pet_name()}记下提醒：{self.pending_reminder_note}\n")
         self.pending_delta = ""
         self.delta_timer.start()
         self.worker = AiWorker(self.config, self.mode.currentText(), question)
@@ -6511,7 +7015,7 @@ class AiDialog(QDialog):
             return
         self.voice_auto_send = True
         self.input.setPlaceholderText("我在听，说完后会自动发送...")
-        self.history.append("\n糯米正在听你说话...")
+        self.history.append(f"\n{self.pet_name()}正在听你说话...")
         self.voice_worker = VoiceInputWorker()
         self.voice_worker.result.connect(self.apply_voice_text)
         self.voice_worker.finished.connect(lambda: setattr(self, "voice_worker", None))
@@ -6547,24 +7051,12 @@ class AiDialog(QDialog):
         self.delta_timer.stop()
         notes = extract_memory_and_progress(question, self.mode.currentText())
         if notes:
-            note_text = "\n".join(f"糯米记下了：{note}" for note in notes)
+            note_text = "\n".join(f"{self.pet_name()}记下了：{note}" for note in notes)
             self.history.append("\n" + note_text)
             parent = self.parent()
             if parent and hasattr(parent, "refresh_growth_state"):
                 parent.refresh_growth_state(show_new=True)
-        items = load_json(CHAT, [])
-        items.append(
-            {
-                "id": str(time.time()),
-                "mode": self.mode.currentText(),
-                "question": question,
-                "answer": answer,
-                "memory_notes": notes,
-                "reminder_note": self.pending_reminder_note,
-                "created_at": datetime.now().isoformat(timespec="seconds"),
-            }
-        )
-        save_json(CHAT, items)
+        self.save_chat_turn(question, answer, notes, self.pending_reminder_note)
         if self.force_speak_answer or self.config.get("ChatVoiceReplies", True):
             self.speak_reply(answer)
         self.force_speak_answer = False
@@ -8375,6 +8867,7 @@ class TodayBoardDialog(QDialog):
     def __init__(self, pet):
         super().__init__(pet)
         self.pet = pet
+        pet_name = str(pet.config.get("PetName") or DEFAULT_CONFIG["PetName"])
         self.setWindowTitle("今日看板")
         self.resize(660, 640)
         self.setMinimumSize(560, 520)
@@ -8423,7 +8916,7 @@ class TodayBoardDialog(QDialog):
             ("查看邮件", pet.open_mail),
             ("电脑诊断", pet.open_diagnostics),
             ("桌面整理", pet.open_desktop_organizer),
-            ("和糯米聊聊", pet.open_ai),
+            (f"和{pet_name}聊聊", pet.open_ai),
         ]
         for index, (label, fn) in enumerate(action_items):
             button = QPushButton(label)
@@ -8810,7 +9303,8 @@ class FeatureSwitchDialog(QDialog):
                 row_layout = QHBoxLayout(row)
                 row_layout.setContentsMargins(12, 10, 12, 10)
                 row_layout.setSpacing(10)
-                text = QLabel(f"<b>{label}</b><br><span style='color:#94a3b8'>{description}</span>")
+                display_label = feature_display_label(key, config)
+                text = QLabel(f"<b>{display_label}</b><br><span style='color:#94a3b8'>{description}</span>")
                 text.setWordWrap(True)
                 check = QCheckBox("开启")
                 check.setChecked(feature_enabled(config, key))
@@ -9982,8 +10476,9 @@ class PetSmartMenu(QDialog):
         layout = QVBoxLayout(content)
         layout.setContentsMargins(8, 6, 8, 6)
         layout.setSpacing(10)
+        pet_name = str(pet.config.get("PetName") or DEFAULT_CONFIG["PetName"])
 
-        title = QLabel(f"{pet.config.get('PetName', '糯米')}")
+        title = QLabel(pet_name)
         title.setObjectName("smartTitle")
         memory = yesterday_study_memory()
         hint = QLabel(memory or time_greeting())
@@ -10020,7 +10515,7 @@ class PetSmartMenu(QDialog):
         primary = [
             ("工具箱", "工具箱", pet.open_core_toolbox),
             ("Claude", "中文启动", pet.open_claude_code),
-            ("问我", "和糯米聊聊", pet.open_ai),
+            ("问问", f"和{pet_name}聊聊", pet.open_ai),
             ("截图", "OCR 提问", pet.ocr_screenshot),
             ("文件", "快速查找", pet.open_file_search),
             ("清理", "空间/性能", pet.open_performance),
@@ -12602,24 +13097,38 @@ class PetWindow(QWidget):
                 return str(path)
         return ""
 
+    def refresh_window_flags(self):
+        was_visible = self.isVisible()
+        flags = Qt.FramelessWindowHint | Qt.Tool
+        if self.config.get("Topmost", True):
+            flags |= Qt.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
+        if was_visible:
+            self.show()
+            self.raise_()
+
     def setup_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         icon_path = self.tray_icon_source()
         icon = QIcon(icon_path) if icon_path else self.windowIcon()
         self.tray = QSystemTrayIcon(icon, self)
-        self.tray.setToolTip(f"{self.config.get('PetName', '糯米')} - 双击显示/收起")
+        pet_name = str(self.config.get("PetName") or DEFAULT_CONFIG["PetName"])
+        self.tray.setToolTip(f"{pet_name} - 双击显示/收起")
         menu = QMenu()
-        show_action = QAction("显示糯米", self)
+        show_action = QAction(f"显示{pet_name}", self)
         show_action.triggered.connect(self.restore_from_tray)
         hide_action = QAction("收起到托盘", self)
         hide_action.triggered.connect(self.hide_to_tray)
-        ai_action = QAction("打开 AI 助手", self)
+        ai_action = QAction(f"问问{pet_name}", self)
         ai_action.triggered.connect(self.open_ai)
         settings_action = QAction("设置", self)
         settings_action.triggered.connect(self.open_settings)
-        quit_action = QAction("退出糯米", self)
+        quit_action = QAction(f"退出{pet_name}", self)
         quit_action.triggered.connect(self.exit_pet)
+        self.tray_show_action = show_action
+        self.tray_ai_action = ai_action
+        self.tray_quit_action = quit_action
         for action in (show_action, hide_action, ai_action, settings_action):
             menu.addAction(action)
         menu.addSeparator()
@@ -12627,6 +13136,18 @@ class PetWindow(QWidget):
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.on_tray_activated)
         self.tray.show()
+
+    def refresh_tray_labels(self):
+        if not self.tray:
+            return
+        pet_name = str(self.config.get("PetName") or DEFAULT_CONFIG["PetName"])
+        self.tray.setToolTip(f"{pet_name} - 双击显示/收起")
+        if hasattr(self, "tray_show_action"):
+            self.tray_show_action.setText(f"显示{pet_name}")
+        if hasattr(self, "tray_ai_action"):
+            self.tray_ai_action.setText(f"问问{pet_name}")
+        if hasattr(self, "tray_quit_action"):
+            self.tray_quit_action.setText(f"退出{pet_name}")
 
     def on_tray_activated(self, reason):
         if reason in (QSystemTrayIcon.DoubleClick, QSystemTrayIcon.Trigger):
@@ -13023,7 +13544,7 @@ class PetWindow(QWidget):
         self.set_bubble_enabled(False, announce=False)
 
     def feature_disabled_notice(self, key):
-        self.bubble.say(f"{feature_label(key)} 已在功能开关里关闭。")
+        self.bubble.say(f"{feature_display_label(key, self.config)} 已在功能开关里关闭。")
 
     def require_feature(self, key):
         if feature_enabled(self.config, key):
@@ -13330,6 +13851,63 @@ class PetWindow(QWidget):
         self.refresh_growth_state(show_new=False)
         self.sync_health_timer()
         self.update_status()
+        self.refresh_tray_labels()
+        self.apply_feature_switch_changes()
+
+    def apply_natural_setting_effects(self, changed_keys):
+        changed_keys = set(changed_keys or [])
+        style_keys = set(TEXT_STYLE_KEYS) | set(BUBBLE_COLOR_KEYS) | set(BUBBLE_FRAME_KEYS)
+        sprite_keys = {"PetSize", "PetImagePath", "ActionPackPath"}
+        if "Opacity" in changed_keys:
+            self.setWindowOpacity(float(self.config.get("Opacity", 1)))
+        if "Topmost" in changed_keys:
+            self.refresh_window_flags()
+        if sprite_keys & changed_keys:
+            self.sprite.config = self.config
+            self.sprite.load_image()
+            self.adjustSize()
+            self.ensure_safe_window_position(save=True)
+        if style_keys & changed_keys:
+            self.apply_text_styles(self.config)
+        elif {"BubbleOffsetX", "BubbleOffsetY"} & changed_keys and self.bubble.isVisible():
+            self.position_bubble()
+        if "WeatherCity" in changed_keys:
+            self.weather_text = f"{self.config.get('WeatherCity', '上海')} 天气读取中"
+        self.refresh_tray_labels()
+        self.apply_feature_switch_changes()
+        if "WeatherCity" in changed_keys:
+            self.refresh_weather(show_bubble=False)
+
+    def try_apply_natural_settings(self, text):
+        result = parse_natural_setting_changes(
+            text,
+            self.config,
+            pet_name=str(self.config.get("PetName") or DEFAULT_CONFIG["PetName"]),
+        )
+        if not result.get("handled"):
+            return ""
+        changed_keys = set(result.get("changed_keys") or [])
+        if changed_keys:
+            self.config.update(result.get("config") or {})
+            save_json(CONFIG, self.config)
+            self.apply_natural_setting_effects(changed_keys)
+        pet_name = str(self.config.get("PetName") or DEFAULT_CONFIG["PetName"])
+        lines = []
+        if result.get("notes"):
+            lines.append(f"{pet_name}已帮你改好设置：")
+            lines.extend(f"- {note}" for note in result["notes"])
+        if result.get("noops") and not result.get("notes"):
+            lines.append("这些设置本来就是这样：")
+            lines.extend(f"- {note}" for note in result["noops"][:5])
+        if result.get("blocked"):
+            lines.append("这些项目没有通过聊天修改：")
+            lines.extend(f"- {note}" for note in result["blocked"])
+        if not lines:
+            return ""
+        answer = "\n".join(lines)
+        if changed_keys and self.config.get("BubbleEnabled", True):
+            self.bubble.say("设置已改好：\n" + "\n".join(result.get("notes", [])[:3]), ms=6500)
+        return answer
 
     def open_todos(self):
         if not self.require_feature("TodoFeatureEnabled"):
