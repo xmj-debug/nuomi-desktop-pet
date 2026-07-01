@@ -4,6 +4,7 @@ import asyncio
 import base64
 import csv
 import hashlib
+import html
 import imaplib
 import ipaddress
 import json
@@ -3919,6 +3920,12 @@ def mail_dashboard_text():
     unread = state.get("last_unread_count")
     if unread is None:
         return "邮件监控中"
+    messages = state.get("last_mail_messages", [])
+    if isinstance(messages, list):
+        for message in messages[:5]:
+            code = str(message.get("verification_code") or "").strip()
+            if code:
+                return f"未读邮件：{unread}封，验证码 {code}"
     return f"未读邮件：{unread}封"
 
 
@@ -4945,6 +4952,119 @@ def text_header(value):
     return "".join(pieces)
 
 
+def mail_clean_text(value, limit=420):
+    text = str(value or "")
+    text = html.unescape(text)
+    text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", text)
+    text = re.sub(r"(?s)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?s)</p\s*>", "\n", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = re.sub(r"[ \t\r\f\v]+", " ", text)
+    text = re.sub(r"\n\s*\n+", "\n", text)
+    text = "\n".join(line.strip() for line in text.splitlines() if line.strip())
+    text = text.strip()
+    if limit and len(text) > limit:
+        return text[: max(0, limit - 1)].rstrip() + "…"
+    return text
+
+
+def mail_part_text(part):
+    content_type = part.get_content_type()
+    if content_type not in {"text/plain", "text/html"}:
+        return ""
+    disposition = str(part.get_content_disposition() or "").lower()
+    if disposition == "attachment":
+        return ""
+    try:
+        text = part.get_content()
+    except Exception:
+        payload = part.get_payload(decode=True)
+        if not payload:
+            return ""
+        charset = part.get_content_charset() or "utf-8"
+        text = payload.decode(charset, errors="replace")
+    return mail_clean_text(text, limit=0) if content_type == "text/html" else mail_clean_text(text, limit=0)
+
+
+def mail_body_preview(message, limit=420):
+    plain_parts = []
+    html_parts = []
+    try:
+        parts = message.walk() if message.is_multipart() else [message]
+    except Exception:
+        parts = [message]
+    for part in parts:
+        content_type = part.get_content_type()
+        text = mail_part_text(part)
+        if not text:
+            continue
+        if content_type == "text/plain":
+            plain_parts.append(text)
+        elif content_type == "text/html":
+            html_parts.append(text)
+    text = "\n".join(plain_parts or html_parts)
+    return mail_clean_text(text, limit=limit)
+
+
+def normalize_mail_code(value):
+    code = re.sub(r"[\s\-_:：]", "", str(value or "").strip())
+    if not re.fullmatch(r"[A-Za-z0-9]{4,10}", code):
+        return ""
+    if not any(ch.isdigit() for ch in code):
+        return ""
+    return code.upper()
+
+
+def extract_mail_verification_code(subject, preview):
+    text = f"{subject or ''}\n{preview or ''}"
+    direct_keywords = (
+        "验证码",
+        "校验码",
+        "动态码",
+        "一次性代码",
+        "验证代码",
+    )
+    lowered = text.lower()
+    english_keyword = re.search(
+        r"\b(?:verification code|security code|one[- ]time code|login code|otp|code)\b",
+        lowered,
+    )
+    if not any(keyword in lowered for keyword in direct_keywords) and not english_keyword:
+        return ""
+    patterns = [
+        r"(?:验证码|校验码|动态码|一次性代码|验证代码|verification code|security code|one[- ]time code|login code|otp|\bcode\b)\D{0,24}([A-Za-z0-9][A-Za-z0-9\s\-]{2,16}[A-Za-z0-9])",
+        r"([A-Za-z0-9][A-Za-z0-9\s\-]{2,16}[A-Za-z0-9])\D{0,18}(?:验证码|校验码|动态码|verification code|security code|otp|\bcode\b)",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            code = normalize_mail_code(match.group(1))
+            if code:
+                return code
+    for match in re.finditer(r"\b\d{4,8}\b", text):
+        code = normalize_mail_code(match.group(0))
+        if code:
+            return code
+    return ""
+
+
+def mail_display_text(item):
+    subject = str(item.get("subject") or "(无标题)")
+    sender = str(item.get("sender") or "")
+    date = str(item.get("date") or "")
+    code = str(item.get("verification_code") or "").strip()
+    preview = mail_clean_text(item.get("preview", ""), limit=220).replace("\n", " ")
+    lines = [subject]
+    if sender:
+        lines.append(sender)
+    if date:
+        lines.append(date)
+    if code:
+        lines.append(f"验证码：{code}")
+    if preview:
+        lines.append(f"内容：{preview}")
+    return "\n".join(lines)
+
+
 def mail_date_sort_value(value):
     try:
         return parsedate_to_datetime(str(value)).timestamp()
@@ -4955,6 +5075,8 @@ def mail_date_sort_value(value):
 MAIL_FETCH_TIMEOUT = 8
 MAIL_CACHE_MAX_AGE_SECONDS = 10 * 60
 MAIL_HEADER_QUERY = "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])"
+MAIL_MESSAGE_PREVIEW_BYTES = 256 * 1024
+MAIL_MESSAGE_QUERY = f"(BODY.PEEK[]<0.{MAIL_MESSAGE_PREVIEW_BYTES}>)"
 
 
 def parse_iso_datetime(value):
@@ -4981,7 +5103,10 @@ def fetch_imap_headers_batch(client, mail_ids):
     id_text = ",".join(mid.decode("ascii", errors="ignore") if isinstance(mid, bytes) else str(mid) for mid in mail_ids)
     if not id_text:
         return []
-    _status, msg_data = client.fetch(id_text, MAIL_HEADER_QUERY)
+    try:
+        _status, msg_data = client.fetch(id_text, MAIL_MESSAGE_QUERY)
+    except Exception:
+        _status, msg_data = client.fetch(id_text, MAIL_HEADER_QUERY)
     parsed = []
     for item in msg_data or []:
         if not isinstance(item, tuple) or len(item) < 2 or not item[1]:
@@ -5036,6 +5161,8 @@ def update_mail_cache(messages, total_unread, provider_filter=None):
                 "subject",
                 "sender",
                 "date",
+                "preview",
+                "verification_code",
                 "unread_count",
                 "account_unread_count",
                 "account_label",
@@ -5095,12 +5222,17 @@ def fetch_unread_mail_account(account, limit=20):
             messages = []
             provider = account.get("provider") or mail_provider_for(host, user)
             for mid, msg in fetch_imap_headers_batch(client, mail_ids):
+                subject = text_header(msg.get("Subject", "")).strip() or "(无标题)"
+                preview = mail_body_preview(msg)
+                verification_code = extract_mail_verification_code(subject, preview)
                 messages.append(
                     {
                         "id": mid,
-                        "subject": text_header(msg.get("Subject", "")).strip() or "(无标题)",
+                        "subject": subject,
                         "sender": text_header(msg.get("From", "")).strip(),
                         "date": text_header(msg.get("Date", "")).strip(),
+                        "preview": preview,
+                        "verification_code": verification_code,
                         "unread_count": unread_count,
                         "account_unread_count": unread_count,
                         "account_label": account.get("label") or user,
@@ -7288,10 +7420,17 @@ class MailWorker(QThread):
             subject = msg.get("subject", "")
             sender = msg.get("sender", "")
             date = msg.get("date", "")
-            if any(k.lower() in subject.lower() for k in keywords):
+            preview = msg.get("preview", "")
+            code = msg.get("verification_code", "")
+            haystack = f"{subject}\n{preview}".lower()
+            if any(k.lower() in haystack for k in keywords):
                 alerts.append(f"关键词邮件：{subject}")
             else:
                 alerts.append(f"{sender} | {subject}")
+            if code:
+                alerts.append(f"验证码：{code}")
+            elif preview:
+                alerts.append("内容：" + mail_clean_text(preview, limit=120))
             if date:
                 alerts.append(date)
         self.result.emit("\n".join(alerts))
@@ -7469,6 +7608,7 @@ class MailDialog(QDialog):
         bottom_buttons = QHBoxLayout()
         refresh = QPushButton("刷新")
         open_mail = QPushButton("打开所选邮件")
+        copy_content = QPushButton("复制验证码/内容")
         compose_qq = QPushButton("写 QQ 邮件")
         compose_gmail = QPushButton("写 Gmail")
         open_qq = QPushButton("打开 QQ 邮箱")
@@ -7476,6 +7616,7 @@ class MailDialog(QDialog):
         close = QPushButton("关闭")
         refresh.setObjectName("ghostButton")
         open_mail.setObjectName("sendButton")
+        copy_content.setObjectName("ghostButton")
         compose_qq.setObjectName("ghostButton")
         compose_gmail.setObjectName("ghostButton")
         open_qq.setObjectName("ghostButton")
@@ -7483,6 +7624,7 @@ class MailDialog(QDialog):
         close.setObjectName("ghostButton")
         refresh.clicked.connect(lambda: self.load_mail(self.current_provider(), force=True))
         open_mail.clicked.connect(self.open_selected)
+        copy_content.clicked.connect(self.copy_selected_content)
         compose_qq.clicked.connect(lambda: self.open_compose("qq"))
         compose_gmail.clicked.connect(lambda: self.open_compose("gmail"))
         open_qq.clicked.connect(lambda: open_mail_url("qq"))
@@ -7490,6 +7632,7 @@ class MailDialog(QDialog):
         close.clicked.connect(self.close)
         top_buttons.addWidget(refresh)
         top_buttons.addWidget(open_mail)
+        top_buttons.addWidget(copy_content)
         top_buttons.addStretch(1)
         bottom_buttons.addWidget(compose_qq)
         bottom_buttons.addWidget(compose_gmail)
@@ -7507,6 +7650,9 @@ class MailDialog(QDialog):
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.setSpacing(8)
+        mail_list.setWordWrap(True)
+        mail_list.setTextElideMode(Qt.ElideNone)
+        mail_list.setSpacing(6)
         section_title = QLabel(title)
         section_title.setObjectName("subtitle")
         panel_layout.addWidget(section_title)
@@ -7588,7 +7734,11 @@ class MailDialog(QDialog):
         unread = items[0].get("account_unread_count", len(items))
         mail_list.addItem(f"{label} 未读邮件：{unread}（显示最近 {len(items)} 封）")
         for item in items:
-            mail_list.addItem(f"{item.get('subject')}\n{item.get('sender')}\n{item.get('date')}")
+            text = mail_display_text(item)
+            widget_item = QListWidgetItem(text)
+            line_count = text.count("\n") + 1
+            widget_item.setSizeHint(QSize(0, min(190, max(82, line_count * 21 + 18))))
+            mail_list.addItem(widget_item)
 
     def worker_finished(self):
         self.worker = None
@@ -7602,18 +7752,45 @@ class MailDialog(QDialog):
         self.worker = None
         super().closeEvent(event)
 
-    def open_selected(self):
+    def selected_message(self):
         mail_list = self.current_list()
         messages = self.current_messages()
         idx = mail_list.currentRow()
         msg_idx = idx - 1
         if msg_idx < 0 or msg_idx >= len(messages):
+            return None
+        return messages[msg_idx]
+
+    def copy_selected_content(self):
+        message = self.selected_message()
+        if not message:
+            QMessageBox.information(self, "复制邮件内容", "请先选中一封邮件。")
+            return
+        code = str(message.get("verification_code") or "").strip()
+        preview = mail_clean_text(message.get("preview", ""), limit=600)
+        text = code or preview or str(message.get("subject") or "")
+        if not text:
+            QMessageBox.information(self, "复制邮件内容", "这封邮件没有可复制的正文预览。")
+            return
+        QApplication.clipboard().setText(text)
+        QMessageBox.information(self, "已复制", "已复制验证码。" if code else "已复制邮件内容预览。")
+
+    def open_selected(self):
+        message = self.selected_message()
+        if not message:
             self.open_default_inbox()
             return
-        subject = messages[msg_idx]["subject"]
-        open_mail_url(self.current_provider(), messages[msg_idx].get("inbox_url"))
-        QApplication.clipboard().setText(subject)
-        QMessageBox.information(self, "已打开邮箱", "已复制邮件标题。进入网页邮箱后可直接粘贴搜索。")
+        subject = message.get("subject", "")
+        open_mail_url(self.current_provider(), message.get("inbox_url"))
+        copy_text = message.get("verification_code") or subject
+        QApplication.clipboard().setText(copy_text)
+        QMessageBox.information(
+            self,
+            "已打开邮箱",
+            "已复制验证码。进入网页邮箱后可直接粘贴。"
+            if message.get("verification_code")
+            else "已复制邮件标题。进入网页邮箱后可直接粘贴搜索。",
+        )
 
     def open_default_inbox(self):
         open_mail_url(self.current_provider())
